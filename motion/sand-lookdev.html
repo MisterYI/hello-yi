@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sand Lookdev</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { width: min(100vw, 177.78vh); height: auto; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+// Sand-art look development: one composition (a white cat on a rooftop under
+// the moon, winter plum blossoms) rendered in three light-box looks, each with a
+// short motion test: pour, finger-carve, hold, palm sweep.
+//
+// How the sand is rendered:
+//   1. Sand is a density field drawn into an offscreen canvas (red channel).
+//      Pouring adds density, a finger carves it back to zero and piles a little
+//      ridge on both sides, a palm sweep pushes it into a moving bank.
+//   2. A shading pass turns density into light with Beer-Lambert absorption,
+//      T = exp(-k * d), modulated by three scales of grain noise so thin sand
+//      breaks into individual grains and thick sand reads as a solid silhouette.
+//   3. The light box colour, vignette and a soft bloom around clear areas give
+//      the glow of light coming up through glass.
+// Segment n (n = 0, 1, 2) covers t in [10n, 10n + 10) and uses look n.
+
+const W = 1280, H = 720, FPS = 30, SEG = 10, DURATION = 30;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const dens = new OffscreenCanvas(W, H);
+const dctx = dens.getContext('2d', { willReadFrequently: true });
+const bloom = new OffscreenCanvas(W / 4, H / 4);
+const bctx = bloom.getContext('2d');
+
+const LOOKS = [
+  { name: '琥珀灯箱 AMBER', light: [[255, 216, 134], [236, 142, 44], [112, 48, 12]], sand: [30, 13, 5], k: 3.6, grain: 0.8 },
+  { name: '月白 MOONLIGHT', light: [[248, 245, 236], [206, 209, 211], [84, 88, 96]], sand: [14, 15, 18], k: 3.8, grain: 0.75 },
+  { name: '暮色 DUSK', light: null, sand: [26, 12, 30], k: 3.6, grain: 0.8 },
+];
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const ease = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const easeOut = k => 1 - Math.pow(1 - k, 3);
+function rng(seed) {   // mulberry32
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const hash = n => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+const bez = (p0, c, p1, t) => [
+  (1 - t) * (1 - t) * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0],
+  (1 - t) * (1 - t) * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1],
+];
+// Sample a chain of quadratic segments [[p0, c, p1], ...] into a polyline.
+function sample(segs, n = 24) {
+  const pts = [];
+  segs.forEach(([p0, c, p1], i) => { for (let j = i ? 1 : 0; j <= n; j++) pts.push(bez(p0, c, p1, j / n)); });
+  return pts;
+}
+function polyline(pts, upTo = 1) {
+  const n = Math.max(2, Math.floor(pts.length * upTo));
+  dctx.beginPath();
+  dctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < n; i++) dctx.lineTo(pts[i][0], pts[i][1]);
+}
+
+// ---------- sand operations on the density canvas ----------
+function pour(drawPath, amount, blur = 1.5) {
+  if (amount <= 0) return;
+  dctx.save();
+  dctx.globalCompositeOperation = 'lighter';
+  dctx.filter = `blur(${blur}px)`;
+  dctx.fillStyle = `rgba(255,255,255,${clamp(amount)})`;
+  dctx.strokeStyle = dctx.fillStyle;
+  drawPath(dctx);
+  dctx.restore();
+}
+// A finger line: clears sand along the path and leaves a ridge on both sides.
+// Width follows finger pressure: swelling in the middle, tapering at both ends.
+// The stroke is first drawn opaque into a scratch mask, then composited once, so
+// overlapping segments never stack up into beads.
+const MASK = new OffscreenCanvas(W, H), mctx = MASK.getContext('2d');
+const RIDGE = new OffscreenCanvas(W, H), rctx = RIDGE.getContext('2d');
+function carve(pts, width, upTo = 1, strength = 1) {
+  if (upTo <= 0) return;
+  const n = Math.max(2, Math.floor(pts.length * upTo));
+  const press = i => { const u = i / (pts.length - 1); return 0.35 + 0.65 * Math.sin(Math.PI * clamp(u * 1.08 - 0.04)) * (0.85 + 0.3 * hash(i * 0.37)); };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < n; i++) { x0 = Math.min(x0, pts[i][0]); y0 = Math.min(y0, pts[i][1]); x1 = Math.max(x1, pts[i][0]); y1 = Math.max(y1, pts[i][1]); }
+  const pad = width + 20;
+  const bx = Math.max(0, Math.floor(x0 - pad)), by = Math.max(0, Math.floor(y0 - pad));
+  const bw = Math.min(W, Math.ceil(x1 + pad)) - bx, bh = Math.min(H, Math.ceil(y1 + pad)) - by;
+  if (bw <= 0 || bh <= 0) return;
+  for (const [c, extra, color] of [[mctx, 0, '#000'], [rctx, 8, '#fff']]) {
+    c.clearRect(bx, by, bw, bh);
+    c.lineCap = 'round'; c.lineJoin = 'round'; c.strokeStyle = color;
+    for (let i = 0; i < n - 1; i++) {
+      c.lineWidth = width * press(i) + extra;
+      c.beginPath(); c.moveTo(...pts[i]); c.lineTo(...pts[i + 1]); c.stroke();
+    }
+  }
+  dctx.save();
+  dctx.globalCompositeOperation = 'lighter';
+  dctx.filter = 'blur(2.5px)';
+  dctx.globalAlpha = 0.2 * strength;
+  dctx.drawImage(RIDGE, bx, by, bw, bh, bx, by, bw, bh);
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.filter = 'blur(1.2px)';
+  dctx.globalAlpha = 0.95 * strength;
+  dctx.drawImage(MASK, bx, by, bw, bh, bx, by, bw, bh);
+  dctx.restore();
+}
+function poke(x, y, r, amount = 1) {   // fingertip dot
+  dctx.save();
+  dctx.globalCompositeOperation = 'lighter';
+  dctx.filter = 'blur(1.5px)';
+  dctx.fillStyle = `rgba(255,255,255,${0.2 * amount})`;
+  dctx.beginPath(); dctx.arc(x, y, r + 3, 0, Math.PI * 2); dctx.fill();
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.fillStyle = `rgba(0,0,0,${0.9 * amount})`;
+  dctx.beginPath(); dctx.arc(x, y, r, 0, Math.PI * 2); dctx.fill();
+  dctx.restore();
+}
+
+// ---------- the composition ----------
+const MOON = { x: 420, y: 250, r: 118 };
+
+function skyLayer(p) {
+  pour(c => {
+    const g = c.createRadialGradient(MOON.x, MOON.y, 80, MOON.x + 80, MOON.y + 60, 980);
+    g.addColorStop(0, `rgba(255,255,255,${0.02 * p})`);
+    g.addColorStop(0.3, `rgba(255,255,255,${0.16 * p})`);
+    g.addColorStop(0.7, `rgba(255,255,255,${0.34 * p})`);
+    g.addColorStop(1, `rgba(255,255,255,${0.5 * p})`);
+    c.fillStyle = g; c.fillRect(0, 0, W, H);
+  }, 1, 0);
+  // the artist banks sand around the edges of the glass: a soft, uneven frame
+  pour(c => {
+    for (let i = 0; i < 4; i++) {
+      const inset = 10 + i * 26;
+      c.lineWidth = 120 - i * 18;
+      c.beginPath();
+      for (let j = 0; j <= 40; j++) {
+        const u = j / 40, side = Math.floor(u * 4), f = u * 4 - side;
+        const wob = (hash(j * 7 + i) - 0.5) * 30;
+        const pts = [[inset + f * (W - 2 * inset), inset + wob], [W - inset + wob, inset + f * (H - 2 * inset)],
+          [W - inset - f * (W - 2 * inset), H - inset + wob], [inset + wob, H - inset - f * (H - 2 * inset)]][side % 4];
+        j ? c.lineTo(...pts) : c.moveTo(...pts);
+      }
+      c.closePath(); c.stroke();
+    }
+  }, 0.16 * p, 45);
+}
+
+// A distant town at the horizon: paler sand (farther away), pitched roofs,
+// a chimney or two, and a few lit windows poked through.
+const TOWN = (() => {
+  const out = []; let x = -10;
+  for (let i = 0; x < 560; i++) {
+    const w = 30 + hash(i) * 34, h = 22 + hash(i + 9) * 40, roof = 10 + hash(i + 3) * 16;
+    out.push({ x, w, h, roof, chimney: hash(i + 21) > 0.7 });
+    x += w + 2;
+  }
+  return out;
+})();
+function town(p) {
+  pour(c => {
+    c.beginPath(); c.moveTo(-10, 604);
+    TOWN.forEach(b => {
+      const base = 604 - b.h;
+      c.lineTo(b.x, base);
+      if (b.chimney) { c.lineTo(b.x + b.w * 0.2, base - b.roof * 0.4); c.lineTo(b.x + b.w * 0.2, base - b.roof - 8); c.lineTo(b.x + b.w * 0.28, base - b.roof - 8); }
+      c.lineTo(b.x + b.w / 2, base - b.roof);
+      c.lineTo(b.x + b.w, base);
+    });
+    c.lineTo(560, 604); c.lineTo(560, H); c.lineTo(-10, H); c.closePath(); c.fill();
+  }, 0.3 * p, 2.2);
+  TOWN.forEach((b, i) => {
+    const k = prog(p, 0.5 + hash(i + 2) * 0.4, 0.7 + hash(i + 2) * 0.3);
+    if (k > 0 && hash(i + 31) > 0.3) poke(b.x + b.w * (0.35 + hash(i + 5) * 0.3), 604 - b.h + 10 + hash(i + 6) * 12, 2.2, k * 0.75);
+  });
+}
+
+// The moon is cleared by circling fingers: a growing wiper arc.
+function moonCarve(p) {
+  if (p <= 0) return;
+  dctx.save();
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.filter = 'blur(3px)';
+  dctx.strokeStyle = 'rgba(0,0,0,0.95)';
+  dctx.lineWidth = MOON.r;
+  dctx.beginPath();
+  dctx.arc(MOON.x, MOON.y, MOON.r / 2, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ease(p));
+  dctx.stroke();
+  dctx.restore();
+  // ridge of pushed sand around the rim
+  const k = prog(p, 0.6, 1);
+  pour(c => { c.lineWidth = 10; c.beginPath(); c.arc(MOON.x, MOON.y, MOON.r + 6, 0, Math.PI * 2); c.stroke(); }, 0.25 * k, 4);
+  // craters: light dabs of sand
+  pour(c => {
+    for (const [dx, dy, r] of [[-38, -22, 20], [30, 34, 15], [16, -48, 9], [-10, 52, 11], [52, -6, 8]]) {
+      c.beginPath(); c.arc(MOON.x + dx, MOON.y + dy, r, 0, Math.PI * 2); c.fill();
+    }
+  }, 0.05 * k, 6);
+}
+
+function roof(p) {
+  pour(c => {
+    c.beginPath();
+    c.moveTo(500, H); c.lineTo(548, 590);
+    c.quadraticCurveTo(560, 578, 580, 578);
+    c.lineTo(1170, 578); c.quadraticCurveTo(1200, 580, 1280, 640); c.lineTo(1280, H);
+    c.closePath(); c.fill();
+  }, 0.95 * p, 1.2);
+  pour(c => { c.fillRect(0, 668, W, 60); }, 0.5 * p, 8);
+}
+function roofTiles(p) {
+  const rows = [[612, 0.5], [646, 0.32], [684, 0.2]];
+  rows.forEach(([y, strength], row) => {
+    for (let i = 0; i < 9; i++) {
+      const x0 = 600 + i * 76 - row * 30 + hash(i + row * 9) * 10;
+      const k = clamp(p * 14 - (row * 3 + i * 0.6));
+      if (k <= 0 || x0 > 1290) continue;
+      carve(sample([[[x0, y], [x0 + 34, y + 16], [x0 + 70, y + 2]]], 12), 3, k, strength);
+    }
+  });
+}
+
+// White chinchilla seen from behind, sitting on the ridge, looking at the moon.
+// Built from overlapping round shapes: chinchillas are all round head and fluff.
+const CAT_O = [890, 584];
+const CAT_SHAPES = [
+  { x: 0, y: -66, rx: 72, ry: 74 },    // body
+  { x: 0, y: -128, rx: 54, ry: 42 },   // shoulders and ruff
+  { x: 0, y: -178, rx: 47, ry: 44 },   // head
+  { x: -32, y: -160, rx: 24, ry: 20 }, // cheek fluff
+  { x: 32, y: -160, rx: 24, ry: 20 },
+].map(e => ({ ...e, x: e.x + CAT_O[0], y: e.y + CAT_O[1] }));
+const EARS = [[[-42, -196], [-30, -232], [-10, -214]], [[42, -196], [30, -232], [10, -214]]]
+  .map(tri => tri.map(([x, y]) => [x + CAT_O[0], y + CAT_O[1]]));
+const TAIL = sample([
+  [[CAT_O[0] + 52, CAT_O[1] - 12], [CAT_O[0] + 150, CAT_O[1] + 2], [CAT_O[0] + 168, CAT_O[1] - 46]],
+  [[CAT_O[0] + 168, CAT_O[1] - 46], [CAT_O[0] + 176, CAT_O[1] - 80], [CAT_O[0] + 150, CAT_O[1] - 88]],
+], 22);
+const inside = (x, y, skip) => CAT_SHAPES.some((e, j) => j !== skip && ((x - e.x) / e.rx) ** 2 + ((y - e.y) / e.ry) ** 2 < 1);
+// points on the outer silhouette, with outward normals, for the fur
+const CAT_EDGE = [];
+CAT_SHAPES.forEach((e, j) => {
+  const n = Math.round((e.rx + e.ry) * 2.2);
+  for (let i = 0; i < n; i++) {
+    const a = i / n * Math.PI * 2, x = e.x + e.rx * Math.cos(a), y = e.y + e.ry * Math.sin(a);
+    if (!inside(x, y, j) && y < CAT_O[1] - 4) CAT_EDGE.push([x, y, a]);
+  }
+});
+
+function cat(p) {
+  pour(c => {
+    CAT_SHAPES.forEach(e => { c.beginPath(); c.ellipse(e.x, e.y, e.rx, e.ry, 0, 0, Math.PI * 2); c.fill(); });
+  }, 1.0 * p, 1.4);
+  pour(c => {
+    c.lineJoin = 'round'; c.lineWidth = 6;
+    EARS.forEach(tri => { c.beginPath(); tri.forEach((q, i) => i ? c.lineTo(...q) : c.moveTo(...q)); c.closePath(); c.fill(); c.stroke(); });
+  }, 1.0 * p, 1.2);
+  // fur: many short, soft tufts along the outline, mostly pointing outwards
+  pour(c => {
+    c.lineCap = 'round'; c.lineWidth = 1.6;
+    c.beginPath();
+    CAT_EDGE.forEach(([x, y, a], i) => {
+      for (let k = 0; k < 2; k++) {
+        const aa = a + (hash(i * 2 + k) - 0.5) * 1.1, len = 2 + hash(i * 3 + k) * 6;
+        const x0 = x - Math.cos(a) * 2, y0 = y - Math.sin(a) * 2;
+        c.moveTo(x0, y0); c.lineTo(x0 + Math.cos(aa) * len, y0 + Math.sin(aa) * len);
+      }
+    });
+    c.stroke();
+  }, 0.55 * p, 0.5);
+  // the tail: a thick plume
+  pour(c => {
+    c.lineCap = 'round';
+    TAIL.forEach((q, i) => {
+      if (i === 0) return;
+      c.lineWidth = lerp(40, 22, i / TAIL.length);
+      c.beginPath(); c.moveTo(...TAIL[i - 1]); c.lineTo(...q); c.stroke();
+    });
+  }, 0.85 * p, 2.2);
+}
+// Moonlight catching the fur on the side facing the moon: a fine carved rim,
+// plus the inner ears.
+function catDetails(p) {
+  const head = CAT_SHAPES[2], body = CAT_SHAPES[0], ruff = CAT_SHAPES[1];
+  const arc = (e, a0, a1, inset) => Array.from({ length: 30 }, (_, i) => {
+    const a = lerp(a0, a1, i / 29);
+    return [e.x + (e.rx - inset) * Math.cos(a), e.y + (e.ry - inset) * Math.sin(a)];
+  });
+  carve(arc(head, Math.PI * 1.05, Math.PI * 1.42, 5), 3.2, prog(p, 0, 0.35), 0.75);
+  carve(arc(ruff, Math.PI * 0.95, Math.PI * 1.15, 5), 2.6, prog(p, 0.2, 0.5), 0.6);
+  carve(arc(body, Math.PI * 0.82, Math.PI * 1.12, 6), 3.4, prog(p, 0.3, 0.7), 0.7);
+  EARS.forEach(([b, tip, c2], i) => {
+    const mid = [(b[0] + c2[0]) / 2, (b[1] + c2[1]) / 2];
+    carve(sample([[[lerp(mid[0], tip[0], 0.2), lerp(mid[1], tip[1], 0.2)], [(mid[0] + tip[0]) / 2 + (i ? -2 : 2), (mid[1] + tip[1]) / 2], [lerp(mid[0], tip[0], 0.75), lerp(mid[1], tip[1], 0.75)]]], 8), 3, prog(p, 0.5 + i * 0.15, 0.8 + i * 0.1), 0.55);
+  });
+}
+
+// A plum branch reaching in from the top right, winter blossoms carved as light.
+const BRANCH = [
+  { pts: sample([[[1300, 70], [1120, 90], [1010, 170]], [[1010, 170], [940, 220], [880, 230]]], 20), w: 16 },
+  { pts: sample([[[1090, 115], [1060, 60], [990, 40]]], 14), w: 7 },
+  { pts: sample([[[1010, 170], [1000, 230], [1040, 280]]], 14), w: 6 },
+  { pts: sample([[[930, 214], [900, 180], [850, 170]]], 12), w: 5 },
+];
+const BLOSSOMS = [[990, 40], [1040, 280], [850, 170], [880, 230], [1060, 70], [1150, 95], [960, 200], [1020, 240], [1100, 120]];
+function branch(p) {
+  BRANCH.forEach((b, i) => {
+    const k = prog(p, i * 0.15, 0.55 + i * 0.15);
+    if (k <= 0) return;
+    pour(c => {
+      c.lineCap = 'round'; c.lineJoin = 'round';
+      const n = Math.max(2, Math.floor(b.pts.length * k));
+      for (let s = 0; s < n - 1; s++) {
+        c.lineWidth = lerp(b.w, b.w * 0.35, s / b.pts.length);
+        c.beginPath(); c.moveTo(...b.pts[s]); c.lineTo(...b.pts[s + 1]); c.stroke();
+      }
+    }, 1.0, 1.2);
+  });
+}
+function blossoms(p) {
+  BLOSSOMS.forEach(([x, y], i) => {
+    const k = prog(p, i * 0.09, i * 0.09 + 0.2);
+    if (k <= 0) return;
+    pour(c => { c.beginPath(); c.arc(x, y, 12, 0, Math.PI * 2); c.fill(); }, 0.7 * k, 2);
+    const s = 0.8 + hash(i) * 0.5;
+    for (let j = 0; j < 5; j++) {
+      const a = j * Math.PI * 2 / 5 + i * 0.7;
+      poke(x + Math.cos(a) * 7 * s, y + Math.sin(a) * 7 * s, (3.2 + hash(i * 5 + j)) * s, k);
+    }
+    pour(c => { c.beginPath(); c.arc(x, y, 2.2, 0, Math.PI * 2); c.fill(); }, 0.6 * k, 0.5);
+  });
+}
+
+const CLOUDS = [
+  sample([[[150, 330], [330, 300], [470, 340]], [[470, 340], [600, 380], [700, 330]]], 24),
+  sample([[[230, 372], [380, 352], [520, 384]]], 24),
+  sample([[[90, 190], [190, 160], [260, 196]]], 16),
+];
+function clouds(p) {
+  CLOUDS.forEach((pts, i) => carve(pts, [12, 8, 6][i], prog(p, i * 0.25, 0.6 + i * 0.25), [0.9, 0.75, 0.6][i]));
+}
+const STARS = Array.from({ length: 14 }, (_, i) => [80 + hash(i + 3) * 760, 40 + hash(i + 17) * 140, 1.6 + hash(i + 5) * 2.2]);
+function stars(p) {
+  STARS.forEach(([x, y, r], i) => {
+    if (Math.hypot(x - MOON.x, y - MOON.y) < MOON.r + 30) return;
+    const k = prog(p, i / STARS.length * 0.8, i / STARS.length * 0.8 + 0.2);
+    if (k > 0) poke(x, y, r, k);
+  });
+}
+
+// The palm sweep: everything behind the hand is pushed into a moving bank of
+// sand, leaving streaks of residue.
+function sweep(p) {
+  if (p <= 0) return;
+  const sx = lerp(-120, W + 160, ease(p));
+  dctx.save();
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.filter = 'blur(6px)';
+  dctx.fillStyle = '#000';
+  dctx.fillRect(-20, -20, sx + 20, H + 40);
+  dctx.restore();
+  pour(c => {
+    for (let i = 0; i < 70; i++) {
+      const y = hash(i * 3.1) * H, len = 120 + hash(i + 9) * 520;
+      const x0 = sx - 60 - hash(i + 4) * 900;
+      c.lineWidth = 1 + hash(i + 2) * 5;
+      c.globalAlpha = 0.08 + hash(i + 6) * 0.18;
+      c.beginPath(); c.moveTo(x0, y); c.lineTo(Math.min(sx - 40, x0 + len), y + (hash(i) - 0.5) * 8); c.stroke();
+    }
+  }, 1, 1.5);
+  const bank = clamp(p * 1.6, 0.3, 1);
+  pour(c => {
+    c.beginPath();
+    c.moveTo(sx - 80, -20);
+    for (let y = -20; y <= H + 20; y += 30) c.lineTo(sx - 40 + Math.sin(y * 0.03) * 18, y);
+    c.lineTo(sx + 10, H + 20); c.lineTo(sx + 10, -20); c.closePath(); c.fill();
+  }, 0.9 * bank, 14);
+}
+
+function drawSand(lt) {
+  dctx.save();
+  dctx.globalCompositeOperation = 'source-over';
+  dctx.filter = 'none';
+  dctx.fillStyle = '#000'; dctx.fillRect(0, 0, W, H);
+  dctx.restore();
+  skyLayer(easeOut(prog(lt, 0, 1.2)));
+  roof(easeOut(prog(lt, 0.3, 1.6)));
+  town(easeOut(prog(lt, 0.6, 2.4)));
+  cat(easeOut(prog(lt, 2.2, 4.2)));
+  branch(prog(lt, 3.2, 5.4));
+  moonCarve(prog(lt, 1.0, 3.0));
+  clouds(prog(lt, 3.0, 5.6));
+  stars(prog(lt, 4.6, 6.2));
+  roofTiles(prog(lt, 1.8, 3.8));
+  catDetails(prog(lt, 4.4, 6.4));
+  blossoms(prog(lt, 5.2, 7.0));
+  sweep(prog(lt, 8.1, 9.9));
+}
+
+// ---------- shading: density -> light through sand ----------
+let GRAIN = null, LIGHT = null;
+const out = ctx.createImageData(W, H);
+
+function noiseLayer(seed, blur) {
+  const c = new OffscreenCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+  const id = x.createImageData(W, H), r = rng(seed);
+  for (let i = 0; i < W * H; i++) { const v = r() * 255; id.data[i * 4] = id.data[i * 4 + 1] = id.data[i * 4 + 2] = v; id.data[i * 4 + 3] = 255; }
+  x.putImageData(id, 0, 0);
+  if (!blur) return id.data;
+  const c2 = new OffscreenCanvas(W, H), x2 = c2.getContext('2d', { willReadFrequently: true });
+  x2.filter = `blur(${blur}px)`; x2.drawImage(c, 0, 0);
+  const d = x2.getImageData(0, 0, W, H).data;
+  // re-stretch the contrast lost to blurring
+  let lo = 255, hi = 0;
+  for (let i = 0; i < W * H; i++) { lo = Math.min(lo, d[i * 4]); hi = Math.max(hi, d[i * 4]); }
+  const out = new Uint8ClampedArray(W * H * 4);
+  for (let i = 0; i < W * H; i++) out[i * 4] = (d[i * 4] - lo) / (hi - lo) * 255;
+  return out;
+}
+
+function lightField(look) {
+  const L = new Float32Array(W * H * 3);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const dx = (x - W * 0.45) / W, dy = (y - H * 0.42) / H;
+    const r = Math.sqrt(dx * dx + dy * dy * 1.6);
+    let c;
+    if (look.light) {
+      const [a, b, e] = look.light;
+      const k1 = clamp(r / 0.45), k2 = clamp((r - 0.45) / 0.35);
+      c = [0, 1, 2].map(j => lerp(lerp(a[j], b[j], k1), e[j], k2));
+    } else {   // dusk: peach glow around the moon, rose, then indigo at the edges
+      const rm = Math.hypot((x - MOON.x) / W, (y - MOON.y) / H * 0.8);
+      const stops = [[255, 222, 178], [236, 132, 150], [104, 76, 168], [44, 34, 92]];
+      const f = clamp(rm / 0.75) * 3, j0 = Math.min(2, Math.floor(f)), kk = f - j0;
+      c = [0, 1, 2].map(j => lerp(stops[j0][j], stops[j0 + 1][j], kk));
+    }
+    const i = (y * W + x) * 3;
+    L[i] = c[0]; L[i + 1] = c[1]; L[i + 2] = c[2];
+  }
+  return L;
+}
+
+const EXP = new Float32Array(2048);
+function shade(look) {
+  const d = dctx.getImageData(0, 0, W, H).data;
+  const { fine, mid, coarse } = GRAIN;
+  const L = LIGHT[LOOKS.indexOf(look)];
+  const [sr, sg, sb] = look.sand;
+  for (let i = 0; i < 2048; i++) EXP[i] = Math.exp(-look.k * i / 512);
+  const o = out.data;
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    const den = d[p] / 255;
+    const g = fine[p] / 255, m = mid[p] / 255, cg = coarse[p] / 255;
+    // grain: thin sand breaks up into individual grains, thick sand stays solid
+    let e = den * (0.45 + look.grain * (0.9 * g * g + 0.35 * (m - 0.5)) + 0.25 * (cg - 0.5));
+    e = e < 0 ? 0 : e * 1.25;
+    const T = EXP[Math.min(2047, (e * 512) | 0)];
+    const q = i * 3;
+    let r = L[q] * T + sr * (1 - T), gg = L[q + 1] * T + sg * (1 - T), b = L[q + 2] * T + sb * (1 - T);
+    // a few grains on top of thick sand catch the room light
+    if (den > 0.45 && g > 0.993) { r += 55; gg += 45; b += 35; }
+    o[p] = r; o[p + 1] = gg; o[p + 2] = b; o[p + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  // bloom: light bleeding around the clear areas
+  bctx.filter = 'blur(10px)';
+  bctx.clearRect(0, 0, bloom.width, bloom.height);
+  bctx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = 0.35;
+  ctx.drawImage(bloom, 0, 0, W, H);
+  ctx.restore();
+}
+
+function label(look, lt) {
+  const a = prog(lt, 0.2, 0.8) * (1 - prog(lt, 7.8, 8.2));
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = a * 0.85;
+  ctx.font = '500 18px "Inter", "WenQuanYi Zen Hei", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.textAlign = 'left';
+  ctx.fillText(`LOOK ${['A', 'B', 'C'][LOOKS.indexOf(look)]} · ${look.name}`, 40, 46);
+  ctx.restore();
+}
+
+function renderFrame(t) {
+  t = clamp(t, 0, DURATION - 1e-6);
+  const n = Math.min(2, Math.floor(t / SEG)), lt = t - n * SEG;
+  drawSand(lt);
+  shade(LOOKS[n]);
+  label(LOOKS[n], lt);
+}
+
+window.FPS = FPS;
+window.DURATION = DURATION;
+window.renderFrame = renderFrame;
+window.ready = (async () => {
+  await document.fonts.load('18px "Inter"').catch(() => {});
+  GRAIN = { fine: noiseLayer(7, 0), mid: noiseLayer(11, 2.2), coarse: noiseLayer(23, 18) };
+  LIGHT = LOOKS.map(lightField);
+  renderFrame(7.5);
+  return true;
+})();
+
+if (!location.search.includes('render')) {
+  window.ready.then(() => {
+    const start = performance.now();
+    const tick = now => { renderFrame(((now - start) / 1000) % DURATION); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+}
+</script>
+</body>
+</html>
