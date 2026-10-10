@@ -3,6 +3,8 @@
 //   node render.mjs agent-explainer.html                 -> out/agent-explainer.mp4 + contact sheet
 //   node render.mjs cat-mv.html --audio out/cat-mv.wav   -> out/cat-mv.mp4 with a soundtrack
 //   node render.mjs cat-mv.html --still 12.5             -> out/still-12.5.png (one frame, for quick checks)
+//   node render.mjs sand-lookdev.html --jpeg             -> pass frames as high-quality JPEG instead of PNG;
+//                                                            much faster for grainy, noise-heavy pictures
 //
 // Pipeline: headless Chromium loads the page, we call window.renderFrame(t)
 // for every frame, read the canvas back as PNG and pipe it into ffmpeg.
@@ -23,6 +25,7 @@ const page_ = args.find((a, i) => a.endsWith('.html') && !args[i - 1]?.startsWit
 const stillAt = flag('--still') !== null ? Number(flag('--still')) : null;
 const audio = flag('--audio') ? resolve(flag('--audio')) : null;
 const name = basename(page_, extname(page_));
+const jpeg = args.includes('--jpeg') && stillAt === null;
 
 // Use the system Chromium if PLAYWRIGHT_CHROMIUM is set or the cloud image path exists.
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM
@@ -35,10 +38,11 @@ await page.evaluate(() => window.ready);
 const { fps, duration } = await page.evaluate(() => ({ fps: window.FPS, duration: window.DURATION }));
 
 const grab = async t => {
-  const dataUrl = await page.evaluate(t => {
+  const dataUrl = await page.evaluate(({ t, jpeg }) => {
     window.renderFrame(t);
-    return document.getElementById('c').toDataURL('image/png');
-  }, t);
+    const c = document.getElementById('c');
+    return jpeg ? c.toDataURL('image/jpeg', 0.95) : c.toDataURL('image/png');
+  }, { t, jpeg });
   return Buffer.from(dataUrl.split(',')[1], 'base64');
 };
 
