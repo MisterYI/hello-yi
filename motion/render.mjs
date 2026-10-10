@@ -1,7 +1,8 @@
-// Render scene.html to an MP4, frame by frame.
+// Render a scene page to an MP4, frame by frame.
 //
-//   node render.mjs                 -> out/hello-yi.mp4 + out/contact-sheet.png
-//   node render.mjs --still 4.2     -> out/still-4.2.png (one frame, for quick checks)
+//   node render.mjs agent-explainer.html                 -> out/agent-explainer.mp4 + contact sheet
+//   node render.mjs cat-mv.html --audio out/cat-mv.wav   -> out/cat-mv.mp4 with a soundtrack
+//   node render.mjs cat-mv.html --still 12.5             -> out/still-12.5.png (one frame, for quick checks)
 //
 // Pipeline: headless Chromium loads the page, we call window.renderFrame(t)
 // for every frame, read the canvas back as PNG and pipe it into ffmpeg.
@@ -9,7 +10,7 @@
 import { chromium } from 'playwright';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -17,7 +18,11 @@ const outDir = join(here, 'out');
 mkdirSync(outDir, { recursive: true });
 
 const args = process.argv.slice(2);
-const stillAt = args.includes('--still') ? Number(args[args.indexOf('--still') + 1]) : null;
+const flag = name => args.includes(name) ? args[args.indexOf(name) + 1] : null;
+const page_ = args.find((a, i) => a.endsWith('.html') && !args[i - 1]?.startsWith('--')) || 'agent-explainer.html';
+const stillAt = flag('--still') !== null ? Number(flag('--still')) : null;
+const audio = flag('--audio') ? resolve(flag('--audio')) : null;
+const name = basename(page_, extname(page_));
 
 // Use the system Chromium if PLAYWRIGHT_CHROMIUM is set or the cloud image path exists.
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM
@@ -25,7 +30,7 @@ const executablePath = process.env.PLAYWRIGHT_CHROMIUM
 
 const browser = await chromium.launch({ executablePath });
 const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-await page.goto(pathToFileURL(join(here, 'scene.html')).href + '?render');
+await page.goto(pathToFileURL(resolve(here, page_)).href + '?render');
 await page.evaluate(() => window.ready);
 const { fps, duration } = await page.evaluate(() => ({ fps: window.FPS, duration: window.DURATION }));
 
@@ -49,10 +54,12 @@ if (stillAt !== null) {
   writeFileSync(file, await grab(stillAt));
   console.log('wrote', file);
 } else {
-  const mp4 = join(outDir, 'agent-explainer.mp4');
+  const mp4 = join(outDir, `${name}.mp4`);
+  const audioArgs = audio ? ['-i', audio, '-c:a', 'aac', '-b:a', '192k', '-shortest'] : [];
   const encoding = run('ffmpeg', [
     '-y', '-loglevel', 'error',
     '-f', 'image2pipe', '-framerate', String(fps), '-i', '-',
+    ...audioArgs,
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-crf', '18', '-preset', 'slow',
     '-movflags', '+faststart', mp4,
   ]);
@@ -73,9 +80,9 @@ if (stillAt !== null) {
   await run('ffmpeg', [
     '-y', '-loglevel', 'error', '-i', mp4,
     '-vf', `fps=1,scale=320:-1,tile=${cols}x${rows}:padding=4:color=white`,
-    '-frames:v', '1', join(outDir, 'contact-sheet.png'),
+    '-frames:v', '1', join(outDir, `${name}-contact-sheet.png`),
   ], { stdio: 'inherit' });
-  console.log('wrote', join(outDir, 'contact-sheet.png'));
+  console.log('wrote', join(outDir, `${name}-contact-sheet.png`));
 }
 
 await browser.close();

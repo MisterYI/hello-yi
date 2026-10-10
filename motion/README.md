@@ -1,41 +1,49 @@
 # motion
 
-用代码做的科普动效视频：**AI Agent 是怎么工作的？**
-成品见 `out/agent-explainer.mp4`（48 秒，1280×720，30fps）。
+用代码做的视频。画面、文字、音乐全部由程序生成，没有使用任何外部素材。
 
-| 时间 | 场景 |
-|---|---|
-| 0–5s | 片头：AI Agent 是怎么工作的？ |
-| 5–11.5s | 聊天机器人 vs Agent：只会「说」 vs 也会「做」 |
-| 11.5–19.5s | 组成：大模型 + 规划 / 工具 / 记忆 / 环境 |
-| 19.5–31.5s | 核心循环：思考 → 行动 → 观察，跑三轮后完成 |
-| 31.5–42s | 实例：查天气，下雨就发邮件提醒带伞 |
-| 42–48s | 总结：Agent = 大模型 + 工具 + 记忆 + 循环 |
+| 作品 | 源文件 | 成品 |
+|---|---|---|
+| 《雪球和我》像素风 MV（64 秒，带配乐） | `cat-mv.html` + `cat-mv-music.mjs` | `out/cat-mv.mp4` |
+| AI Agent 原理科普（48 秒） | `agent-explainer.html` | `out/agent-explainer.mp4` |
+
+## 《雪球和我》
+
+主人和一只白色金吉拉小猫「雪球」的故事。8 个场景，每个 8 秒，正好对应音乐的 4 个小节：
+
+| 时间 | 场景 | 音乐 |
+|---|---|---|
+| 0–8s | 夜空片头，小猫坐在屋顶 | 琶音前奏 |
+| 8–16s | 雨夜，纸箱里的小猫 | 加入贝斯和雨声，一声「喵」 |
+| 16–24s | 抱回家，雨停了 | 主旋律 + 轻鼓 |
+| 24–32s | 追毛线球，每拍跳一下 | 主旋律 + 轻鼓 |
+| 32–40s | 深夜加班，小猫在键盘旁睡着 | 安静的低八度主旋律 |
+| 40–48s | 窗台上的春夏秋冬，小猫长大 | 副歌，完整鼓组 |
+| 48–56s | 夕阳下的长椅 | 副歌 + 和声 |
+| 56–64s | 结尾 THE END | 尾声，渐弱 |
+
+- **画面**：先画到 320×180 的像素缓冲区，再无平滑放大 4 倍，每个「像素」都是清晰的 4×4 方块。
+  角色是逐格画的像素图（见 `KIT_SIT`、`OWN_HEAD` 等字符画），光影用有序抖动（dither）表现。
+- **字幕**：Unifont 像素字体，RPG 对话框逐字打出。
+- **音乐**：`cat-mv-music.mjs` 用方波、三角波和噪声合成 8-bit 音乐（120 BPM，C–G–Am–F），输出 WAV。
 
 ## 原理
 
 AI 不直接"生成"视频，而是写一段程序画出每一帧：
 
-1. **`scene.html`**：一个 Canvas 页面，里面的 `renderFrame(t)` 根据时间 `t`（秒）画出那一帧。
-   不能用 `Date.now` / `Math.random`，每一帧只由 `t` 决定，所以可以随意跳到任意帧。
-2. **`render.mjs`**：用无头 Chromium 打开页面，逐帧调用 `renderFrame(t)` 并截取画布，
-   把 PNG 流式交给 ffmpeg 编码成 MP4，最后生成一张拼板 `out/contact-sheet.png`，一眼检查整条片子。
+1. **场景页面**：一个 Canvas 页面，`renderFrame(t)` 根据时间 `t`（秒）画出那一帧。
+   每一帧只由 `t` 决定，所以可以随意跳到任意帧。
+2. **`render.mjs`**：用无头 Chromium 逐帧截取画布，交给 ffmpeg 编码成 MP4（可以合入音轨），
+   最后生成一张拼板图 `out/<名字>-contact-sheet.png`，一眼检查整条片子。
 
 ## 用法
 
 ```bash
 cd motion
 npm install
-npm run render          # 输出 out/agent-explainer.mp4 和 out/contact-sheet.png
-npm run still -- 22.5   # 只渲染第 22.5 秒那一帧，调效果时用
+npm run render:cat                          # 生成音乐并渲染 out/cat-mv.mp4
+npm run render:agent                        # 渲染 out/agent-explainer.mp4
+npm run still -- cat-mv.html --still 12.5   # 只渲染一帧，调效果时用
 ```
 
-直接在浏览器里打开 `scene.html` 就能实时预览（循环播放）。需要本机装好 ffmpeg。
-
-## 想改成自己的内容
-
-改 `scene.html` 里的场景函数和 `SCENES` 时间表即可。跟 AI 提需求时，建议这样说：
-
-> 用一个独立的 HTML 文件写 1280×720 的 Canvas 动画，暴露 `renderFrame(t)`，每帧只由 t 决定，
-> 不用外部资源。时长 10–20 秒，分 3–5 个场景，每个场景只讲一个视觉点。
-> 先列出场景和时间轴，再写代码；渲染几张静帧检查后再出完整视频。
+直接在浏览器里打开 `cat-mv.html` 就能预览；先运行一次 `node cat-mv-music.mjs`，点画面即可带音乐播放。需要本机装好 ffmpeg。

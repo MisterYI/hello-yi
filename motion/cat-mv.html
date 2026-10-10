@@ -1,0 +1,739 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>雪球和我</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { width: min(100vw, 177.78vh); height: auto; display: block; image-rendering: pixelated; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<audio id="music" src="out/cat-mv.wav" preload="auto"></audio>
+<script>
+// 雪球和我 — a pixel-art music video about an owner and a white chinchilla kitten.
+//
+// The picture is drawn into a 320x180 pixel buffer and scaled up 4x with no
+// smoothing, so every "pixel" is a crisp 4x4 block. Captions are drawn on top
+// at full resolution in Unifont (a bitmap-style font that covers Chinese).
+// Every frame is a pure function of time t. Timing follows the soundtrack in
+// cat-mv-music.mjs: 120 BPM, one scene per 4 bars (8 s), 8 scenes.
+
+const W = 1280, H = 720, FPS = 30;
+const BPM = 120, BEAT = 60 / BPM, BAR = BEAT * 4, SCENE = BAR * 4, DURATION = SCENE * 8;
+const LW = 320, LH = 180;
+const PIXEL = '"Unifont", monospace';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const low = document.createElement('canvas');
+low.width = LW; low.height = LH;
+const lctx = low.getContext('2d');
+const img = lctx.createImageData(LW, LH);
+const buf = new Uint32Array(img.data.buffer);
+
+// ---------- math ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const easeInOutCubic = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const easeOutBack = k => { const s = 1.70158; return 1 + (s + 1) * Math.pow(k - 1, 3) + s * Math.pow(k - 1, 2); };
+const hash = n => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+// ---------- pixel buffer ----------
+const COLORS = new Map();
+function col(hex) {
+  let c = COLORS.get(hex);
+  if (c === undefined) {
+    const n = parseInt(hex.slice(1), 16);
+    c = ((255 << 24) | ((n & 255) << 16) | (n & 0xff00) | ((n >> 16) & 255)) >>> 0;  // ABGR
+    COLORS.set(hex, c);
+  }
+  return c;
+}
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const bayer = (x, y) => (BAYER[(y & 3) * 4 + (x & 3)] + 0.5) / 16;
+
+let CLIP = null;   // optional [x0, y0, x1, y1] clip rectangle
+function px(x, y, hex) {
+  x = Math.floor(x); y = Math.floor(y);
+  if (x < 0 || y < 0 || x >= LW || y >= LH) return;
+  if (CLIP && (x < CLIP[0] || y < CLIP[1] || x >= CLIP[2] || y >= CLIP[3])) return;
+  buf[y * LW + x] = col(hex);
+}
+function rect(x, y, w, h, hex) {
+  x = Math.round(x); y = Math.round(y);
+  for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) px(i, j, hex);
+}
+// Ordered-dither fill: covers `level` (0..1) of the pixels, the classic pixel-art "transparency".
+function drect(x, y, w, h, hex, level) {
+  x = Math.round(x); y = Math.round(y);
+  for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) if (bayer(i, j) < level) px(i, j, hex);
+}
+function disc(cx, cy, r, hex, level = 1) {
+  cx = Math.round(cx); cy = Math.round(cy);
+  for (let j = -r; j <= r; j++) for (let i = -r; i <= r; i++)
+    if (i * i + j * j <= r * r + r * 0.6 && (level >= 1 || bayer(cx + i, cy + j) < level)) px(cx + i, cy + j, hex);
+}
+function line(x0, y0, x1, y1, hex) {
+  x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy;
+  for (;;) {
+    px(x0, y0, hex);
+    if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x0 += sx; }
+    if (e2 <= dx) { err += dx; y0 += sy; }
+  }
+}
+// Dithered vertical gradient through a list of colour stops.
+function vgrad(y0, y1, stops) {
+  for (let y = Math.max(0, y0); y < Math.min(LH, y1); y++) {
+    const f = (y - y0) / (y1 - y0) * (stops.length - 1);
+    const i = Math.min(stops.length - 2, Math.floor(f)), k = f - i;
+    for (let x = 0; x < LW; x++) px(x, y, bayer(x, y) < k ? stops[i + 1] : stops[i]);
+  }
+}
+function fadeToBlack(level) {
+  if (level <= 0) return;
+  for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) if (bayer(x, y) < level) buf[y * LW + x] = col('#000000');
+}
+
+// ---------- sprites ----------
+const PAL = {
+  k: '#1e1a2e', w: '#fbf8f4', g: '#d9d0d8', p: '#f4a0b4', e: '#3fbfa4', E: '#1e1a2e',
+  s: '#f5c9a6', h: '#5a3a2e', c: '#ef7d5a', C: '#c65a42', j: '#41548c', b: '#2a2238',
+  r: '#ff5d7a', y: '#ffd76a', n: '#c39058', N: '#93673a',
+};
+const solid = hex => new Proxy({}, { get: () => hex });
+
+function sprite(rows, x, y, { flip = false, pal = PAL, maxRow = Infinity } = {}) {
+  x = Math.round(x); y = Math.round(y);
+  const w = Math.max(...rows.map(r => r.length));
+  rows.forEach((row, j) => {
+    if (j >= maxRow) return;
+    for (let i = 0; i < row.length; i++) {
+      const ch = row[i];
+      if (ch === '.') continue;
+      px(flip ? x + w - 1 - i : x + i, y + j, pal[ch]);
+    }
+  });
+}
+
+// White chinchilla kitten: round, very fluffy, teal eyes, pink nose.
+const KIT_SIT = [
+  '.k........k...',
+  'kpk......kpk..',
+  'kwpk....kpwk..',
+  'kwwwkkkkwwwk..',
+  'kwwwwwwwwwwk..',
+  'kweEwwwweEwk..',
+  'kweewwwweewk..',
+  'kwwwwppwwwwk..',
+  '.kwwwwwwwwk...',
+  'kwgwwwwwwgwk..',
+  'kwwwwwwwwwwkkk',
+  'kwgwwwwwwgwkwk',
+  '.kkkkkkkkkkkk.',
+];
+const KIT_SIT_BLINK = KIT_SIT.map((r, i) => i === 5 ? 'kwwwwwwwwwwk..' : i === 6 ? 'kwkkwwwwkkwk..' : r);
+const KIT_WALK = [[
+  '...........k.k..',
+  '..........kpkpk.',
+  '..kk......kwwwwk',
+  '.kwwk....kwwweEk',
+  '.kwk.....kwwwwwpk',
+  '..kwkkkkkwwwwwk.',
+  '...kwwwwwwwwwwk.',
+  '...kwwwwwwwwwk..',
+  '...kwgwwwwwgwk..',
+  '...kwk.kk..kwk..',
+  '...kk......kk...',
+], null];
+KIT_WALK[1] = KIT_WALK[0].map((r, i) => i === 9 ? '....kwk...kwk...' : i === 10 ? '....kk.....kk...' : r);
+const KIT_LOAF = [
+  '..........k.k.',
+  '.........kpkpk',
+  '..kkkkkkkwwwwk',
+  '.kwwwwwwwwkkwk',
+  'kwwwwwwwwwwwpk',
+  'kwgwwwwwwwwwk.',
+  'kwwwwwwwwwwwk.',
+  '.kkkkkkkkkkk..',
+];
+const CAT_SIT = [
+  '.k............k...',
+  'kpk..........kpk..',
+  'kwpk........kpwk..',
+  'kwwwkkkkkkkkwwwk..',
+  'kwwwwwwwwwwwwwwk..',
+  'kwwwwwwwwwwwwwwk..',
+  'kwweEwwwwwweEwwk..',
+  'kwweewwwwwweewwk..',
+  'kwwwwwwppwwwwwwk..',
+  'kgwwwwwwwwwwwwgk..',
+  '.kwwwwwwwwwwwwk...',
+  'kwwwwwwwwwwwwwwk..',
+  'kwgwwwwwwwwwwgwkkk',
+  'kwwwwwwwwwwwwwwkwk',
+  'kwgwwwwwwwwwwgwkwk',
+  'kwwwwwwwwwwwwwwkwk',
+  '.kkkkkkkkkkkkkkkk.',
+];
+const CAT_SIT_BLINK = CAT_SIT.map((r, i) => i === 6 ? 'kwwwwwwwwwwwwwwk..' : i === 7 ? 'kwwkkwwwwwwkkwwk..' : r);
+
+// The owner, side view facing right: head / hoodie / legs, 12 px wide, 24 px tall.
+const OWN_HEAD = [
+  '...kkkkk....',
+  '..khhhhhk...',
+  '.khhhhhhhk..',
+  '.khhhhhhhhk.',
+  '.khhhhssssk.',
+  '.khhhsssksk.',
+  '.khhssssssk.',
+  '..khsssspk..',
+  '...kksssk...',
+];
+const OWN_BODY = [
+  '...kccccck..',
+  '..kcccccccck',
+  '.kccCcccccck',
+  '.kccCcccccck',
+  '.kccCccccck.',
+  '.kccCccccck.',
+  '.kcsCcccck..',
+  '..kcccccck..',
+];
+const OWN_STAND = [
+  '..kjjjjjjk..',
+  '..kjjjjjjk..',
+  '..kjjkkjjk..',
+  '..kjjkkjjk..',
+  '..kjjkkjjk..',
+  '..kbbkkbbbk.',
+  '..kkkkkkkkk.',
+];
+const OWN_STRIDE = [
+  '..kjjjjjjk..',
+  '..kjjjjjjk..',
+  '.kjjjkkjjjk.',
+  '.kjjk..kjjk.',
+  'kjjk....kjjk',
+  'kbbk....kbbbk',
+  'kkk......kkkk',
+];
+const OWN_SIT = [
+  '..kjjjjjjjjk',
+  '..kjjjjjjjjk',
+  '..kkkkkkjjjk',
+  '........kjjk',
+  '........kjjk',
+  '........kbbbk',
+  '........kkkkk',
+];
+
+function owner(x, y, { pose = 'stand', frame = 0, flip = false, holding = false, pal = PAL } = {}) {
+  sprite(OWN_HEAD, x, y, { flip, pal });
+  sprite(OWN_BODY, x, y + 9, { flip, pal });
+  const legs = pose === 'sit' ? OWN_SIT : pose === 'walk' && frame % 2 === 0 ? OWN_STRIDE : OWN_STAND;
+  sprite(legs, x, y + 17, { flip, pal });
+  if (holding) {
+    sprite(KIT_SIT, x - 1, y + 8, { maxRow: 9, pal });
+    px(x + 1, y + 16, pal.s); px(x + 10, y + 16, pal.s);   // hands under the kitten
+  }
+}
+
+const HEART = ['.rr.rr.', 'rrrrrrr', 'rrrrrrr', '.rrrrr.', '..rrr..', '...r...'];
+const BANG = ['.kkkkkkk.', 'kwwwkwwwk', 'kwwwkwwwk', 'kwwwkwwwk', 'kwwwwwwwk', 'kwwwkwwwk', '.kkkkkkk.', '..kk.....', '..k......'];
+const NOTE = ['..kk', '..kk', '..k.', '..k.', 'kkk.', 'kkk.'];
+const ZZZ = ['kkk', '..k', '.k.', 'k..', 'kkk'];
+
+function umbrella(cx, top) {
+  const r = 13;
+  for (let j = 0; j <= 6; j++) {
+    const half = Math.round(r * Math.sqrt(1 - Math.pow((6 - j) / 6.5, 2)));
+    for (let i = -half; i <= half; i++) {
+      const edge = j === 0 || Math.abs(i) === half;
+      px(cx + i, top + j, edge ? PAL.k : Math.floor((i + r) / 4.4) % 2 ? '#e2504c' : '#ffd76a');
+    }
+  }
+  for (let i = -r; i <= r; i++) px(cx + i, top + 7, PAL.k);
+  rect(cx, top + 7, 1, 15, PAL.k);
+}
+
+// ---------- shared backdrops ----------
+function stars(t, count = 60, maxY = 110, seed = 0) {
+  const beat = Math.floor(t / BEAT);
+  for (let i = 0; i < count; i++) {
+    const x = Math.floor(hash(i + seed) * LW), y = Math.floor(hash(i + 50 + seed) * maxY);
+    const tw = (beat + i) % 6;
+    if (tw === 0) continue;
+    const big = hash(i + 9 + seed) > 0.85;
+    const c = big ? '#fff6c8' : '#c9c3ff';
+    px(x, y, c);
+    if (big && tw % 3 === 0) { px(x - 1, y, c); px(x + 1, y, c); px(x, y - 1, c); px(x, y + 1, c); }
+  }
+}
+function moon(x, y, r = 14) {
+  disc(x, y, r, '#fff3c4');
+  disc(x - 5, y - 3, 3, '#efe1a8'); disc(x + 5, y + 5, 2, '#efe1a8'); disc(x + 3, y - 6, 1, '#efe1a8');
+}
+function skyline(t, seed, baseY, color, win, scroll = 0, minH = 20, maxH = 60) {
+  const step = 26, first = Math.floor(scroll / step) - 1;
+  const beat = Math.floor(t / BEAT);
+  for (let n = first; n < first + 15; n++) {
+    const bx = n * step - scroll;
+    const w = 18 + Math.floor(hash(n * 3 + seed) * 10);
+    const h = minH + Math.floor(hash(n * 7 + seed) * (maxH - minH));
+    rect(bx, baseY - h, w, h, color);
+    if (!win) continue;
+    for (let wy = baseY - h + 4; wy < baseY - 4; wy += 6)
+      for (let wx = bx + 3; wx < bx + w - 3; wx += 5)
+        if (hash(n * 13 + wy * 7 + wx * 3) > 0.62 && (beat + wx + wy) % 13 !== 0) rect(wx, wy, 2, 3, win);
+  }
+}
+function rainDrops(t, amount, color = '#8796cf') {
+  const n = Math.round(110 * amount);
+  for (let i = 0; i < n; i++) {
+    const y = ((hash(i + 7) * 200 + t * 230) % 200) - 10;
+    const x = ((hash(i) * 380 - y * 0.3) % 360 + 360) % 360 - 20;
+    line(x, y, x - 1, y + 4, color);
+  }
+}
+
+// ---------- scene 1: title, night rooftops (0 - 8s) ----------
+function sceneTitle(t, lt) {
+  vgrad(0, 150, ['#0b0920', '#1d1846', '#3f2d6e', '#6b3f7a']);
+  stars(t);
+  moon(252, 38, 15);
+  skyline(t, 11, 180, '#251d48', null, 0, 40, 80);
+  skyline(t, 1, 180, '#16122e', '#ffd76a', 0, 20, 58);
+  rect(222, 118, 46, 62, '#16122e');
+  rect(220, 116, 50, 3, '#0f0c22');
+  const blink = (lt % 2.5) < 0.15;
+  sprite(blink ? KIT_SIT_BLINK : KIT_SIT, 238, 103);
+}
+function overlayTitle(t, lt) {
+  const word = '雪球和我';
+  [...word].forEach((ch, i) => {
+    const k = prog(lt, 1 + i * BEAT, 1.4 + i * BEAT);
+    if (k <= 0) return;
+    const y = 270 - (1 - easeOutBack(k)) * 40;
+    const x = 640 - 192 + i * 96 + 48;
+    pixelText(ch, x + 6, y + 6, 96, '#1e1a2e', 'center', 1);
+    pixelText(ch, x, y, 96, '#fbf8f4', 'center', 1);
+  });
+  pixelText('一只白色金吉拉的故事', 640, 340, 32, '#d9d0ff', 'center', prog(lt, 3.2, 3.8));
+  pixelText('♪ PIXEL MV ♪', 640, 390, 32, '#ffd76a', 'center', prog(lt, 4.0, 4.6) * (Math.floor(lt * 2) % 2 ? 1 : 0.7));
+}
+
+// ---------- scene 2: rainy night, the box (8 - 16s) ----------
+function sceneRain(t, lt) {
+  vgrad(0, 150, ['#10152b', '#1a2140', '#26304f']);
+  skyline(t, 21, 150, '#1c2340', '#3d4a7a', 0, 30, 90);
+  rect(0, 150, LW, 30, '#262b40');
+  rect(0, 150, LW, 2, '#3a4060');
+  for (let i = 0; i < 9; i++) {   // puddle glints
+    const x = Math.floor(hash(i + 3) * 300), y = 156 + Math.floor(hash(i + 4) * 20);
+    if ((Math.floor(t / BEAT) + i) % 3) rect(x, y, 6 + (i % 3) * 3, 1, '#4a5584');
+  }
+  // street lamp with a dithered light cone
+  rect(262, 66, 2, 84, '#0f0d1c');
+  rect(250, 66, 14, 2, '#0f0d1c');
+  rect(248, 68, 6, 3, '#ffe9a8');
+  for (let y = 71; y < 150; y++) {
+    const half = (y - 71) * 0.33;
+    drect(251 - half, y, half * 2, 1, '#3e4772', 0.55);
+  }
+  drect(222, 150, 58, 4, '#4a5584', 0.6);
+  // the box with the kitten inside
+  const bx = 214, by = 134;
+  line(bx, by, bx - 6, by - 6, PAL.N); line(bx + 1, by, bx - 5, by - 6, PAL.N);
+  const blink = lt > 4.6 && lt < 4.75 || (lt % 3 < 0.12);
+  sprite(blink ? KIT_SIT_BLINK : KIT_SIT, bx + 7, by - 10);
+  rect(bx, by, 28, 16, PAL.n);
+  rect(bx, by, 28, 2, PAL.N);
+  rect(bx, by + 14, 28, 2, PAL.N);
+  line(bx + 27, by, bx + 33, by - 5, PAL.N); line(bx + 26, by, bx + 32, by - 5, PAL.N);
+  // the owner walks in with an umbrella and stops
+  const walking = lt < 4.5;
+  const ox = lerp(-16, 172, easeOutCubic(prog(lt, 0, 4.5)));
+  const frame = walking ? Math.floor(lt / (BEAT / 2)) : 1;
+  owner(ox, 126, { pose: walking ? 'walk' : 'stand', frame });
+  umbrella(ox + 13, 112);
+  if (lt > 4.6 && lt < 6.2) sprite(BANG, ox + 1, 104 - (lt < 4.8 ? 2 : 0));
+  if (lt > 5.6) {
+    const hy = 116 - (lt - 5.6) * 6;
+    if (hy > 96 || Math.floor(lt * 6) % 2) sprite(HEART, bx + 10, hy);
+  }
+  rainDrops(t, 1);
+}
+
+// ---------- scene 3: carrying the kitten home (16 - 24s) ----------
+function sceneHome(t, lt) {
+  const clear = prog(lt, 3.5, 6);
+  vgrad(0, 150, clear > 0.5 ? ['#0b0920', '#1d1846', '#3f2d6e'] : ['#10152b', '#1a2140', '#26304f']);
+  if (clear > 0) {
+    stars(t, Math.round(50 * clear), 90, 200);
+    moon(60, lerp(60, 34, easeOutCubic(clear)), 12);
+  }
+  const scroll = lt * 22;
+  skyline(t, 31, 150, '#1c2340', '#3d4a7a', scroll * 0.4, 30, 80);
+  rect(0, 150, LW, 30, '#262b40');
+  rect(0, 150, LW, 2, '#3a4060');
+  for (let n = Math.floor(scroll / 110) - 1; n < Math.floor(scroll / 110) + 4; n++) {   // passing lamps
+    const lx = n * 110 - scroll + 40;
+    rect(lx, 76, 2, 74, '#0f0d1c');
+    rect(lx - 3, 74, 8, 3, '#ffe9a8');
+    for (let y = 77; y < 150; y++) drect(lx + 1 - (y - 77) * 0.25, y, (y - 77) * 0.5, 1, '#3e4772', 0.5);
+  }
+  // a cosy house sliding in at the end
+  const hx = 340 - prog(lt, 5, 8) * 120;
+  rect(hx, 104, 70, 46, '#3b2f55');
+  for (let j = 0; j < 22; j++) rect(hx - 6 + j * 1.6, 104 - j, 82 - j * 3.2, 1, '#5a3a5e');
+  rect(hx + 10, 116, 16, 14, '#ffd76a'); rect(hx + 17, 116, 2, 14, '#3b2f55');
+  rect(hx + 44, 120, 14, 30, '#2a2040'); px(hx + 55, 135, '#ffd76a');
+  drect(hx + 6, 150, 26, 4, '#ffd76a', 0.3);
+
+  const frame = Math.floor(lt / (BEAT / 2));
+  owner(150, 126, { pose: 'walk', frame, holding: true });
+  if (lt < 4) umbrella(163, 112);
+  if (lt > 4.6) {
+    for (let i = 0; i < 4; i++) {
+      const k = (lt - 4.6 - i * BEAT * 2) / 2;
+      if (k < 0 || k > 1) continue;
+      sprite(HEART, 152 + Math.sin(k * 6 + i) * 6, 128 - k * 30);
+    }
+  }
+  rainDrops(t, 1 - prog(lt, 2, 4.5));
+}
+
+// ---------- scene 4: chasing yarn in the room (24 - 32s) ----------
+function room(wall, dots, floor, plank) {
+  rect(0, 0, LW, 150, wall);
+  for (let y = 4; y < 146; y += 10) for (let x = (y / 10) % 2 ? 4 : 9; x < LW; x += 10) px(x, y, dots);
+  rect(0, 146, LW, 4, '#d9a873');
+  rect(0, 150, LW, 30, floor);
+  for (let y = 154; y < LH; y += 6) rect(0, y, LW, 1, plank);
+  for (let y = 150; y < LH; y += 6) for (let x = (y % 12 ? 20 : 50); x < LW; x += 60) rect(x, y, 1, 6, plank);
+}
+function scenePlay(t, lt) {
+  room('#f6dfb8', '#ecd0a2', '#b97a4a', '#9c6338');
+  // window with drifting cloud
+  rect(28, 28, 64, 54, '#fff7ea');
+  rect(32, 32, 56, 46, '#9be0ff');
+  CLIP = [32, 32, 88, 78];
+  const cx = 30 + ((lt * 6) % 80);
+  disc(cx, 50, 6, '#ffffff'); disc(cx + 7, 48, 7, '#ffffff'); disc(cx + 14, 51, 5, '#ffffff');
+  CLIP = null;
+  rect(59, 32, 2, 46, '#fff7ea'); rect(32, 54, 56, 2, '#fff7ea');
+  // picture frame and plant
+  rect(130, 34, 30, 22, '#8a5a3a'); rect(133, 37, 24, 16, '#ffd1a6');
+  disc(141, 47, 4, '#fbf8f4'); px(139, 46, PAL.k); px(143, 46, PAL.k);   // a tiny cat portrait
+  rect(296, 132, 14, 14, '#c65a42');
+  disc(303, 122, 9, '#4caf50'); disc(298, 116, 5, '#5cc35c'); disc(308, 117, 5, '#3c9f40');
+  // rug
+  for (let y = 152; y < 172; y++) {
+    const half = 90 * Math.sqrt(1 - Math.pow((y - 162) / 10.5, 2));
+    drect(160 - half, y, half * 2, 1, '#e86f7d', 0.75);
+  }
+  // yarn ball and the kitten chasing it, hopping on every beat
+  const yx = 160 + 95 * Math.sin(lt * 0.9);
+  const dir = Math.cos(lt * 0.9) >= 0 ? 1 : -1;
+  for (let i = 0; i < 24; i++) px(yx - dir * i * 1.5, 149 + Math.round(Math.sin(i * 0.7 + lt * 4)), '#e2504c');
+  disc(yx, 145, 5, '#e2504c');
+  const a = yx / 5;
+  line(yx - 4 * Math.cos(a), 145 - 4 * Math.sin(a), yx + 4 * Math.cos(a), 145 + 4 * Math.sin(a), '#b83a3a');
+  line(yx - 4 * Math.sin(a), 145 + 4 * Math.cos(a), yx + 4 * Math.sin(a), 145 - 4 * Math.cos(a), '#b83a3a');
+  const hop = Math.round(Math.abs(Math.sin(lt * Math.PI / BEAT)) * 6);
+  const kx = yx - dir * 26 - 8;
+  sprite(KIT_WALK[Math.floor(lt / (BEAT / 2)) % 2], kx, 139 - hop, { flip: dir < 0 });
+  // the owner watching and humming
+  owner(268, 126, { flip: true });
+  for (let i = 0; i < 4; i++) {
+    const k = (lt - i * BEAT * 2) % (BEAT * 8) / 2;
+    if (k < 0 || k > 1) continue;
+    sprite(NOTE, 262 - k * 10 + Math.sin(k * 8) * 2, 118 - k * 26, { pal: solid('#7a4e9a') });
+  }
+}
+
+// ---------- scene 5: late night at the desk (32 - 40s) ----------
+function sceneNight(t, lt) {
+  rect(0, 0, LW, 150, '#2a2342');
+  drect(0, 0, LW, 150, '#231d38', 0.5);
+  rect(0, 150, LW, 30, '#1b162c');
+  for (let y = 154; y < LH; y += 6) rect(0, y, LW, 1, '#16122a');
+  // window
+  rect(22, 26, 56, 52, '#3b3260');
+  CLIP = [26, 30, 74, 74];
+  vgrad(30, 74, ['#0b0920', '#1d1846']);
+  stars(t, 40, 74, 300);
+  moon(60, 44, 7);
+  CLIP = null;
+  rect(49, 30, 2, 44, '#3b3260'); rect(26, 51, 48, 2, '#3b3260');
+  // wall clock running fast: time flies
+  disc(110, 40, 9, '#d9d0d8'); disc(110, 40, 7, '#fbf8f4');
+  const m = lt * Math.PI, hh = lt * Math.PI / 12;
+  line(110, 40, 110 + 6 * Math.sin(m), 40 - 6 * Math.cos(m), PAL.k);
+  line(110, 40, 110 + 4 * Math.sin(hh), 40 - 4 * Math.cos(hh), '#c65a42');
+  // desk lamp glow
+  for (let y = 84; y < 112; y++) drect(262 - (y - 84) * 0.6, y, (y - 84) * 1.2, 1, '#6a5046', 0.5);
+  // desk
+  rect(146, 112, 120, 4, '#7a4e33');
+  rect(150, 116, 3, 34, '#5e3b26'); rect(259, 116, 3, 34, '#5e3b26');
+  rect(258, 82, 10, 3, '#c65a42'); line(262, 85, 256, 108, '#c65a42'); rect(250, 108, 12, 4, '#c65a42');
+  rect(232, 104, 7, 8, '#fbf8f4'); rect(239, 106, 2, 3, '#fbf8f4');   // mug
+  if (Math.floor(lt * 3) % 2) { px(234, 101, '#9b93b8'); px(236, 99, '#9b93b8'); }
+  // chair + owner typing
+  rect(124, 119, 22, 3, '#4b3a5a'); rect(122, 96, 3, 28, '#4b3a5a'); rect(126, 122, 2, 28, '#4b3a5a'); rect(142, 122, 2, 28, '#4b3a5a');
+  // laptop light washes over the owner
+  for (let y = 94; y < 112; y++) drect(134, y, 44, 1, '#3a5a80', 0.45);
+  owner(130, 100, { pose: 'sit' });
+  rect(156, 110, 22, 2, '#c8cbe0');
+  line(177, 110, 181, 93, '#d8dbee'); line(178, 110, 182, 93, '#d8dbee'); line(179, 110, 183, 93, '#b0b4cc');
+  const tap = Math.floor(lt / (BEAT / 2)) % 2;
+  px(144 + tap * 2, 109, PAL.s); px(147 + tap * 2, 109 - tap, PAL.s);
+  // the kitten asleep by the keyboard
+  sprite(KIT_LOAF, 200, 104 + (Math.floor(lt / BEAT) % 2 ? 0 : 0));
+  for (let i = 0; i < 3; i++) {
+    const k = ((lt + i * 0.9) % 2.7) / 2.7;
+    sprite(ZZZ, 212 + k * 8 + i * 2, 100 - k * 22, { pal: solid(k > 0.8 && Math.floor(lt * 8) % 2 ? '#2a2342' : '#d9d0ff') });
+  }
+}
+
+// ---------- scene 6: four seasons at the window (40 - 48s) ----------
+const SEASONS = [
+  { sky: '#bfe6ff', ground: '#9ad46a', leaf: '#f7b6cc', leaf2: '#ff8fb3', fall: '#ffc2d6', name: '春', en: 'SPRING' },
+  { sky: '#7fd0ff', ground: '#5cb85c', leaf: '#4caf50', leaf2: '#3c8f40', fall: null, name: '夏', en: 'SUMMER' },
+  { sky: '#ffd6a0', ground: '#d9a04a', leaf: '#e8833a', leaf2: '#c8622a', fall: '#e8833a', name: '秋', en: 'AUTUMN' },
+  { sky: '#c9d6e8', ground: '#f2f6ff', leaf: '#eef3fb', leaf2: '#c9d6e8', fall: '#ffffff', name: '冬', en: 'WINTER' },
+];
+const seasonOf = lt => Math.min(3, Math.floor(lt / (BAR)));
+function sceneSeasons(t, lt) {
+  const s = SEASONS[seasonOf(lt)];
+  room('#efdcc0', '#e6cfae', '#c08a5a', '#a87448');
+  // window and the world outside
+  rect(96, 16, 128, 108, '#fff7ea');
+  CLIP = [100, 20, 220, 120];
+  rect(100, 20, 120, 100, s.sky);
+  if (seasonOf(lt) === 1) {
+    disc(196, 42, 9, '#ffd76a');
+    if (Math.floor(lt / BEAT) % 2) for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      px(196 + 13 * Math.cos(a), 42 + 13 * Math.sin(a), '#ffd76a');
+    }
+  }
+  for (let x = 100; x < 220; x++) rect(x, 100 + Math.round(3 * Math.sin(x / 12)), 1, 20, s.ground);
+  rect(128, 66, 5, 36, '#6b4428');
+  line(130, 76, 118, 64, '#6b4428'); line(131, 72, 142, 60, '#6b4428');
+  if (seasonOf(lt) === 3) {
+    disc(130, 60, 12, '#eef3fb', 0.55); rect(110, 98, 110, 3, '#ffffff');
+  } else {
+    disc(130, 58, 15, s.leaf); disc(119, 64, 8, s.leaf); disc(142, 64, 8, s.leaf);
+    for (let i = 0; i < 14; i++) px(118 + hash(i) * 26, 46 + hash(i + 5) * 24, s.leaf2);
+  }
+  if (s.fall) for (let i = 0; i < 26; i++) {
+    const x = 100 + ((hash(i) * 140 + lt * 10 + Math.sin(lt * 2 + i) * 4) % 120);
+    const y = 20 + ((hash(i + 3) * 100 + lt * (seasonOf(lt) === 3 ? 14 : 20)) % 100);
+    px(x, y, s.fall); if (i % 3 === 0) px(x + 1, y, s.fall);
+  }
+  CLIP = null;
+  rect(158, 20, 4, 100, '#fff7ea'); rect(100, 68, 120, 3, '#fff7ea');
+  // curtains
+  rect(80, 12, 18, 116, '#e86f7d'); rect(222, 12, 18, 116, '#e86f7d');
+  for (let x = 82; x < 98; x += 5) rect(x, 12, 1, 116, '#c9505f');
+  for (let x = 224; x < 240; x += 5) rect(x, 12, 1, 116, '#c9505f');
+  rect(76, 9, 168, 3, '#8a5a3a');
+  // windowsill + the cat, growing up
+  rect(88, 124, 144, 6, '#fff7ea'); rect(88, 130, 144, 2, '#d9c7a8');
+  const blink = (lt % 2) < 0.12;
+  if (seasonOf(lt) < 2) sprite(blink ? KIT_SIT_BLINK : KIT_SIT, 153, 111);
+  else sprite(blink ? CAT_SIT_BLINK : CAT_SIT, 151, 107);
+}
+function overlaySeasons(t, lt) {
+  const i = seasonOf(lt), s = SEASONS[i];
+  const k = easeOutBack(prog(lt - i * BAR, 0, 0.35));
+  ctx.save();
+  ctx.translate(1100, 130);
+  ctx.scale(k, k);
+  pixelText(s.name, 4, 4, 96, '#1e1a2e', 'center', 1);
+  pixelText(s.name, 0, 0, 96, '#fbf8f4', 'center', 1);
+  ctx.restore();
+  pixelText(s.en, 1100, 222, 32, '#8a5a3a', 'center', k > 0.5 ? 1 : 0);
+}
+
+// ---------- scene 7: sunset on the hill (48 - 56s) ----------
+function sceneSunset(t, lt) {
+  vgrad(0, 150, ['#3b2b6b', '#8a4a8a', '#e86f7d', '#ffb35c', '#ffd98a']);
+  disc(160, 112 + lt * 1.5, 26, '#fff0a0');
+  for (let y = 116; y < 140; y += 5) rect(132, y + Math.floor(lt * 2) % 5, 56, 1, '#ffb35c');
+  for (let i = 0; i < 3; i++) {   // birds
+    const bx = ((lt * 14 + i * 40) % 380) - 30, by = 40 + i * 9 + Math.sin(lt * 3 + i) * 2;
+    const up = Math.floor(lt * 4 + i) % 2;
+    px(bx, by, '#3b2346'); px(bx - 1, by - up, '#3b2346'); px(bx + 1, by - up, '#3b2346'); px(bx - 2, by - 1 + up, '#3b2346'); px(bx + 2, by - 1 + up, '#3b2346');
+  }
+  for (let x = 0; x < LW; x++) {
+    const h1 = 124 + Math.round(8 * Math.sin(x / 30) + 4 * Math.sin(x / 13));
+    rect(x, h1, 1, LH - h1, '#7a3f6e');
+  }
+  for (let x = 0; x < LW; x++) {
+    const h2 = 142 + Math.round(6 * Math.sin(x / 40 + 1));
+    rect(x, h2, 1, LH - h2, '#3b2346');
+  }
+  // bench, owner and the grown-up cat side by side
+  rect(118, 128, 60, 2, '#5a3a2e'); rect(118, 136, 60, 3, '#5a3a2e');
+  rect(122, 139, 2, 8, '#5a3a2e'); rect(172, 139, 2, 8, '#5a3a2e'); rect(120, 128, 2, 8, '#5a3a2e'); rect(174, 128, 2, 8, '#5a3a2e');
+  owner(124, 117, { pose: 'sit' });
+  sprite((lt % 3) < 0.12 ? CAT_SIT_BLINK : CAT_SIT, 150, 119);
+  for (let i = 0; i < 8; i++) {
+    const k = (lt - 0.5 - i * BEAT * 2) / 2.4;
+    if (k < 0 || k > 1) continue;
+    const hx = 148 + Math.sin(k * 7 + i) * 8, hy = 110 - k * 60;
+    if (k < 0.8 || Math.floor(lt * 8) % 2) sprite(HEART, hx, hy);
+  }
+}
+
+// ---------- scene 8: the end (56 - 64s) ----------
+function sceneEnd(t, lt) {
+  vgrad(0, 150, ['#0b0920', '#1d1846', '#3f2d6e', '#6b3f7a']);
+  stars(t, 70, 120, 400);
+  moon(60, 34, 12);
+  if (lt > 2.5 && lt < 3.4) {   // shooting star
+    const k = (lt - 2.5) / 0.9;
+    for (let i = 0; i < 10; i++) px(220 + k * 70 - i * 2, 20 + k * 30 - i, i ? '#c9c3ff' : '#ffffff');
+  }
+  rect(0, 150, LW, 30, '#141026');
+  // the house, with two silhouettes in the lit window
+  rect(118, 96, 84, 54, '#241c40');
+  for (let j = 0; j < 26; j++) rect(160 - j * 2.1, 70 + j, j * 4.2, 1, '#2f2350');
+  rect(176, 72, 8, 14, '#241c40');
+  rect(138, 108, 44, 28, '#ffd76a');
+  CLIP = [138, 108, 182, 136];
+  owner(146, 112, { pal: solid('#6b4a2a') });
+  sprite(CAT_SIT, 162, 119, { pal: solid('#6b4a2a') });
+  CLIP = null;
+  rect(159, 108, 2, 28, '#241c40'); rect(138, 121, 44, 2, '#241c40');
+  drect(132, 150, 56, 6, '#ffd76a', 0.25);
+  rect(124, 126, 10, 24, '#1a1430');
+  fadeToBlack(prog(lt, 6.2, 7.8));
+}
+function overlayEnd(t, lt) {
+  const fade = 1 - prog(lt, 6.2, 7.8);
+  const k = easeOutBack(prog(lt, 4.3, 4.8));
+  ctx.save();
+  ctx.translate(640, 200); ctx.scale(k, k);
+  pixelText('雪球 & 我', 5, 5, 96, '#1e1a2e', 'center', fade);
+  pixelText('雪球 & 我', 0, 0, 96, '#fbf8f4', 'center', fade);
+  ctx.restore();
+  pixelText('THE END', 640, 270, 32, '#ffd76a', 'center', prog(lt, 5.2, 5.6) * fade);
+}
+
+// ---------- hi-res overlay: pixel text and the RPG dialog box ----------
+function pixelText(str, x, y, size, color, align = 'left', alpha = 1) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = `${size}px ${PIXEL}`;
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+  ctx.restore();
+}
+function dialog(str, lt, start, end) {
+  const a = prog(lt, start, start + 0.25) * (1 - prog(lt, end - 0.35, end));
+  if (a <= 0) return;
+  const x = 96, y = 624, w = W - 192, h = 80;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.fillStyle = '#fbf8f4'; ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = '#1a1430'; ctx.fillRect(x + 8, y + 8, w - 16, h - 16);
+  ctx.fillStyle = '#5b4a8a'; ctx.fillRect(x + 12, y + 12, w - 24, 4);
+  // cut the corners for a chunky pixel frame
+  ctx.clearRect(x, y, 4, 4); ctx.clearRect(x + w - 4, y, 4, 4); ctx.clearRect(x, y + h - 4, 4, 4); ctx.clearRect(x + w - 4, y + h - 4, 4, 4);
+  ctx.restore();
+  const chars = [...str];
+  const n = Math.floor((lt - start - 0.2) * 14);
+  pixelText(chars.slice(0, Math.max(0, n)).join(''), x + 40, y + h / 2 + 4, 32, '#fbf8f4', 'left', a);
+  if (n >= chars.length && Math.floor(lt * 3) % 2) {   // blinking ▼
+    ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = '#ffd76a';
+    const bx = x + w - 48, by = y + h - 36;
+    ctx.fillRect(bx, by, 16, 4); ctx.fillRect(bx + 4, by + 4, 8, 4); ctx.fillRect(bx + 6, by + 8, 4, 4);
+    ctx.restore();
+  }
+}
+
+// ---------- timeline ----------
+const SCENES = [
+  { draw: sceneTitle, overlay: overlayTitle },
+  { draw: sceneRain, text: '那天下着雨，你在纸箱里望着我。' },
+  { draw: sceneHome, text: '我把你抱回了家，给你取名叫「雪球」。' },
+  { draw: scenePlay, text: '你追着毛线球，跑遍了整个房间。' },
+  { draw: sceneNight, text: '加班的深夜，你总在键盘旁陪着我。' },
+  { draw: sceneSeasons, text: '春夏秋冬，你一天天长大。', overlay: overlaySeasons },
+  { draw: sceneSunset, text: '谢谢你，来到我的生命里。' },
+  { draw: sceneEnd, text: '以后的每一天，也请多多指教。', textEnd: 4.0, overlay: overlayEnd },
+];
+
+// Pixelated iris wipe between scenes, like an old RPG.
+function iris(k) {
+  if (k >= 1) return;
+  const r = k * 190, r2 = r * r, black = col('#000000');
+  for (let y = 0; y < LH; y++) for (let x = 0; x < LW; x++) {
+    const dx = x - 160, dy = y - 90;
+    if (dx * dx + dy * dy > r2) buf[y * LW + x] = black;
+  }
+}
+
+function renderFrame(t) {
+  t = clamp(t, 0, DURATION - 1e-6);
+  const idx = Math.min(SCENES.length - 1, Math.floor(t / SCENE));
+  const lt = t - idx * SCENE;
+  const scene = SCENES[idx];
+  CLIP = null;
+  buf.fill(col('#000000'));
+  scene.draw(t, lt);
+  const open = idx > 0 ? easeInOutCubic(prog(lt, 0, 0.5)) : 1;
+  const close = idx < SCENES.length - 1 ? easeInOutCubic(1 - prog(lt, SCENE - 0.5, SCENE)) : 1;
+  iris(Math.min(open, close));
+  lctx.putImageData(img, 0, 0);
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(low, 0, 0, W, H);
+  if (scene.overlay) scene.overlay(t, lt);
+  if (scene.text) dialog(scene.text, lt, 0.6, scene.textEnd ?? SCENE - 0.2);
+}
+
+window.FPS = FPS;
+window.DURATION = DURATION;
+window.renderFrame = renderFrame;
+window.ready = (async () => {
+  await document.fonts.load(`32px ${PIXEL}`, '雪球和我').catch(() => {});
+  renderFrame(0);
+  return true;
+})();
+
+// Live preview when opened directly in a browser (render.mjs passes ?render).
+// Click to play with music; the picture then follows the audio clock.
+if (!location.search.includes('render')) {
+  const music = document.getElementById('music');
+  canvas.addEventListener('click', () => {
+    if (music.paused) { music.currentTime = 0; music.play(); } else music.pause();
+  });
+  window.ready.then(() => {
+    const start = performance.now();
+    const tick = now => {
+      const t = !music.paused ? music.currentTime : ((now - start) / 1000) % DURATION;
+      renderFrame(t);
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+</script>
+</body>
+</html>
