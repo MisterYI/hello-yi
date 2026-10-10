@@ -1,0 +1,12 @@
+{
+  "name": "hello-yi-motion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node render.mjs",
+    "still": "node render.mjs --still"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
