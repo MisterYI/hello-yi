@@ -5,6 +5,9 @@
 //   node render.mjs cat-mv.html --still 12.5             -> out/still-12.5.png (one frame, for quick checks)
 //   node render.mjs sand-lookdev.html --jpeg             -> pass frames as high-quality JPEG instead of PNG;
 //                                                            much faster for grainy, noise-heavy pictures
+//   node render.mjs sand-lookdev.html --from 10 --to 20 --out part2
+//                                                         -> render only that time range to out/part2.mp4,
+//                                                            so long renders can run as parallel segments
 //
 // Pipeline: headless Chromium loads the page, we call window.renderFrame(t)
 // for every frame, read the canvas back as PNG and pipe it into ffmpeg.
@@ -24,7 +27,7 @@ const flag = name => args.includes(name) ? args[args.indexOf(name) + 1] : null;
 const page_ = args.find((a, i) => a.endsWith('.html') && !args[i - 1]?.startsWith('--')) || 'agent-explainer.html';
 const stillAt = flag('--still') !== null ? Number(flag('--still')) : null;
 const audio = flag('--audio') ? resolve(flag('--audio')) : null;
-const name = basename(page_, extname(page_));
+const name = flag('--out') || basename(page_, extname(page_));
 const jpeg = args.includes('--jpeg') && stillAt === null;
 
 // Use the system Chromium if PLAYWRIGHT_CHROMIUM is set or the cloud image path exists.
@@ -70,9 +73,11 @@ if (stillAt !== null) {
     '-movflags', '+faststart', mp4,
   ]);
   const ffmpeg = run.last;
-  const frames = Math.round(duration * fps);
+  const first = Math.round(Number(flag('--from') ?? 0) * fps);
+  const last = Math.round(Number(flag('--to') ?? duration) * fps);
+  const frames = last - first;
   for (let i = 0; i < frames; i++) {
-    const png = await grab(i / fps);
+    const png = await grab((first + i) / fps);
     if (!ffmpeg.stdin.write(png)) await new Promise(r => ffmpeg.stdin.once('drain', r));
     if (i % fps === 0) process.stdout.write(`\rframe ${i}/${frames}`);
   }
@@ -82,7 +87,7 @@ if (stillAt !== null) {
 
   // Contact sheet: one still per second tiled into one image, for reviewing
   // the whole video at a glance.
-  const cols = 8, rows = Math.ceil(duration / cols);
+  const cols = 8, rows = Math.ceil(frames / fps / cols);
   await run('ffmpeg', [
     '-y', '-loglevel', 'error', '-i', mp4,
     '-vf', `fps=1,scale=320:-1,tile=${cols}x${rows}:padding=4:color=white`,
