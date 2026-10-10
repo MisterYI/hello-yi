@@ -55,7 +55,9 @@ if (stillAt !== null) {
   console.log('wrote', file);
 } else {
   const mp4 = join(outDir, `${name}.mp4`);
-  const audioArgs = audio ? ['-i', audio, '-c:a', 'aac', '-b:a', '192k', '-shortest'] : [];
+  // Loudness-normalise the soundtrack to -14 LUFS (the usual streaming level) at 48 kHz.
+  const audioArgs = audio ? ['-i', audio, '-af', 'loudnorm=I=-14:TP=-1.5:LRA=11', '-ar', '48000',
+    '-c:a', 'aac', '-b:a', '192k', '-shortest'] : [];
   const encoding = run('ffmpeg', [
     '-y', '-loglevel', 'error',
     '-f', 'image2pipe', '-framerate', String(fps), '-i', '-',

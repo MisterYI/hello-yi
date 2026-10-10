@@ -1,4 +1,4 @@
-// Original 8-bit soundtrack for cat-mv.html, synthesised from scratch.
+// Original 8-bit soundtrack for cat-mv.html (冬冬和我们), synthesised from scratch.
 //
 //   node cat-mv-music.mjs   -> out/cat-mv.wav
 //
@@ -11,7 +11,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SR = 44100, BPM = 120, BEAT = 60 / BPM, BAR = BEAT * 4, BARS = 32;
-const DUR = BARS * BAR;
+const DUR = BARS * BAR, SCENE = BAR * 4;
 const N = Math.ceil((DUR + 1) * SR);
 const L = new Float32Array(N), R = new Float32Array(N);
 const echoBus = new Float32Array(N);
@@ -91,14 +91,11 @@ function meow(t, vol = 0.06) {
     add(start + i, (ph < 0.25 ? 1 : -1) * env * vol, 0.2);
   }
 }
-// Soft rain bed: low-passed noise.
-function rain(t0, t1, vol) {
-  let y = 0;
-  for (let i = Math.round(t0 * SR); i < Math.round(t1 * SR); i++) {
-    const tt = i / SR;
-    const fade = Math.min(1, (tt - t0) / 1.5, (t1 - tt) / 2.5);
-    y += 0.12 * (noise() - y);
-    add(i, y * vol * fade, (i % 2) ? 0.4 : -0.4);
+// Car horn: two short, slightly detuned square blips.
+function honk(t) {
+  for (const dt of [0, 0.22]) {
+    tone(t + dt, 0.13, 81, { duty: 0.5, vol: 0.06, pan: -0.5, a: 0.002, d: 0.02, s: 0.9, r: 0.02 });
+    tone(t + dt, 0.13, 77, { duty: 0.25, vol: 0.05, pan: -0.5, a: 0.002, d: 0.02, s: 0.9, r: 0.02 });
   }
 }
 
@@ -189,9 +186,9 @@ phrase(24, MEL_B, { duty: 0.25, vol: 0.05, pan: -0.3 }, -12);  // doubled an oct
 phrase(28, OUTRO, { ...lead, vol: 0.09 });
 
 // sound effects
-rain(BAR * 4, BAR * 10, 0.05);
-meow(BAR * 6 + 2.8 * BEAT);      // when the kitten notices the owner (scene 2)
-meow(BAR * 10 + 2.6 * BEAT, 0.05); // on the way home (scene 3)
+honk(SCENE + 3.0);              // the cattery van pulls up (scene 2)
+meow(SCENE + 6.4);              // the kitten peeks out of the carrier
+meow(SCENE * 2 + 1.1, 0.05);    // ...and steps out to meet the couple (scene 3)
 
 // ---------- mix down ----------
 // echo on the lead: 3/8-note delay with feedback

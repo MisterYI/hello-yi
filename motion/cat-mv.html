@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>雪球和我</title>
+<title>冬冬和我们</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; }
   body { display: grid; place-items: center; }
@@ -14,7 +14,7 @@
 <canvas id="c" width="1280" height="720"></canvas>
 <audio id="music" src="out/cat-mv.wav" preload="auto"></audio>
 <script>
-// 雪球和我 — a pixel-art music video about an owner and a white chinchilla kitten.
+// 冬冬和我们 — a pixel-art music video about a couple and their white chinchilla kitten.
 //
 // The picture is drawn into a 320x180 pixel buffer and scaled up 4x with no
 // smoothing, so every "pixel" is a crisp 4x4 block. Captions are drawn on top
@@ -109,7 +109,10 @@ const PAL = {
   k: '#1e1a2e', w: '#fbf8f4', g: '#d9d0d8', p: '#f4a0b4', e: '#3fbfa4', E: '#1e1a2e',
   s: '#f5c9a6', h: '#5a3a2e', c: '#ef7d5a', C: '#c65a42', j: '#41548c', b: '#2a2238',
   r: '#ff5d7a', y: '#ffd76a', n: '#c39058', N: '#93673a',
+  H: '#2e1f1c', v: '#b9a3e8', V: '#9580c9', m: '#5a7bd0',
 };
+// The cattery seller reuses the owner sprite in different clothes.
+const SELLER = { ...PAL, h: '#3a3a3a', c: '#5cb85c', C: '#3c8f40', j: '#5a5a66' };
 const solid = hex => new Proxy({}, { get: () => hex });
 
 function sprite(rows, x, y, { flip = false, pal = PAL, maxRow = Infinity } = {}) {
@@ -237,33 +240,112 @@ const OWN_SIT = [
   '........kkkkk',
 ];
 
-function owner(x, y, { pose = 'stand', frame = 0, flip = false, holding = false, pal = PAL } = {}) {
-  sprite(OWN_HEAD, x, y, { flip, pal });
-  sprite(OWN_BODY, x, y + 9, { flip, pal });
-  const legs = pose === 'sit' ? OWN_SIT : pose === 'walk' && frame % 2 === 0 ? OWN_STRIDE : OWN_STAND;
+// The other owner: long dark hair, lavender sweater, blue skirt.
+const FEM_HEAD = [
+  '...kkkkk....',
+  '..kHHHHHk...',
+  '.kHHHHHHHk..',
+  '.kHHHHHHHHk.',
+  '.kHHHHssssk.',
+  '.kHHHsssksk.',
+  '.kHHssssssk.',
+  '.kHHHssspk..',
+  '.kHHHkssk...',
+];
+const FEM_BODY = [
+  '.kHHkvvvvk..',
+  '.kHHvvvvvvvk',
+  '.kHHvVvvvvvk',
+  '..kvvVvvvvvk',
+  '..kvvVvvvvk.',
+  '..kvvVvvvvk.',
+  '..kvsVvvvk..',
+  '..kvvvvvvk..',
+];
+const FEM_STAND = [
+  '..kmmmmmmk..',
+  '.kmmmmmmmmk.',
+  '.kmmmmmmmmk.',
+  '..kkskkskk..',
+  '...ks..sk...',
+  '...kbk.kbk..',
+  '...kkk.kkk..',
+];
+const FEM_STRIDE = [
+  '..kmmmmmmk..',
+  '.kmmmmmmmmk.',
+  'kmmmmmmmmmmk',
+  '.kkskkkkskk.',
+  '.ks.....sk..',
+  'kbk......kbk',
+  'kkk......kkk',
+];
+const FEM_SIT = [
+  '..kmmmmmmmmk',
+  '..kmmmmmmmmk',
+  '..kkkkkkkssk',
+  '........kssk',
+  '........kssk',
+  '........kbbk',
+  '........kkkk',
+];
+const PEOPLE = {
+  he: { head: OWN_HEAD, body: OWN_BODY, stand: OWN_STAND, stride: OWN_STRIDE, sit: OWN_SIT },
+  she: { head: FEM_HEAD, body: FEM_BODY, stand: FEM_STAND, stride: FEM_STRIDE, sit: FEM_SIT },
+};
+
+function owner(x, y, { who = 'he', pose = 'stand', frame = 0, flip = false, holding = false, wave = false, pal = PAL } = {}) {
+  const P = PEOPLE[who];
+  sprite(P.head, x, y, { flip, pal });
+  sprite(P.body, x, y + 9, { flip, pal });
+  const legs = pose === 'sit' ? P.sit : pose === 'walk' && frame % 2 === 0 ? P.stride : P.stand;
   sprite(legs, x, y + 17, { flip, pal });
+  const fx = i => flip ? x + 11 - i : x + i;
   if (holding) {
     sprite(KIT_SIT, x - 1, y + 8, { maxRow: 9, pal });
-    px(x + 1, y + 16, pal.s); px(x + 10, y + 16, pal.s);   // hands under the kitten
+    px(fx(1), y + 16, pal.s); px(fx(10), y + 16, pal.s);   // hands under the kitten
+  }
+  if (wave) {   // a raised hand, swinging on the beat
+    const up = frame % 2;
+    px(fx(11), y + 10, pal.s); px(fx(12), y + 8 - up, pal.s); px(fx(12 + up), y + 7 - up, pal.s);
   }
 }
 
 const HEART = ['.rr.rr.', 'rrrrrrr', 'rrrrrrr', '.rrrrr.', '..rrr..', '...r...'];
-const BANG = ['.kkkkkkk.', 'kwwwkwwwk', 'kwwwkwwwk', 'kwwwkwwwk', 'kwwwwwwwk', 'kwwwkwwwk', '.kkkkkkk.', '..kk.....', '..k......'];
 const NOTE = ['..kk', '..kk', '..k.', '..k.', 'kkk.', 'kkk.'];
 const ZZZ = ['kkk', '..k', '.k.', 'k..', 'kkk'];
 
-function umbrella(cx, top) {
-  const r = 13;
-  for (let j = 0; j <= 6; j++) {
-    const half = Math.round(r * Math.sqrt(1 - Math.pow((6 - j) / 6.5, 2)));
-    for (let i = -half; i <= half; i++) {
-      const edge = j === 0 || Math.abs(i) === half;
-      px(cx + i, top + j, edge ? PAL.k : Math.floor((i + r) / 4.4) % 2 ? '#e2504c' : '#ffd76a');
-    }
+// The cattery's delivery van, facing right; (x, y) is the top-left, wheels touch y + 24.
+function van(x, y, t, moving) {
+  x = Math.round(x); y = Math.round(y + (moving && Math.floor(t * 12) % 2 ? 1 : 0));
+  const body = '#fff3e0', glass = '#9be0ff', stripe = '#f4a0b4';
+  rect(x - 1, y - 1, 40, 22, PAL.k); rect(x + 37, y + 5, 15, 16, PAL.k);
+  rect(x, y, 38, 20, body); rect(x + 38, y + 6, 13, 14, body);
+  rect(x + 43, y + 7, 7, 6, glass); rect(x + 39, y + 7, 3, 6, glass);
+  rect(x, y + 13, 51, 2, stripe);
+  rect(x + 38, y + 6, 1, 14, '#d9cdbd');
+  // paw print logo
+  disc(x + 18, y + 8, 2, '#ff8fb3');
+  rect(x + 14, y + 3, 2, 2, '#ff8fb3'); rect(x + 17, y + 2, 2, 2, '#ff8fb3'); rect(x + 20, y + 3, 2, 2, '#ff8fb3');
+  rect(x + 50, y + 15, 2, 2, '#ffd76a'); rect(x - 1, y + 15, 1, 3, '#e2504c');
+  for (const wx of [x + 10, x + 42]) {
+    disc(wx, y + 20, 4, PAL.k);
+    disc(wx, y + 20, 1, '#b8b8c8');
+    const a = moving ? t * 14 : 0;
+    px(wx + Math.round(3 * Math.cos(a)), y + 20 + Math.round(3 * Math.sin(a)), '#b8b8c8');
   }
-  for (let i = -r; i <= r; i++) px(cx + i, top + 7, PAL.k);
-  rect(cx, top + 7, 1, 15, PAL.k);
+}
+
+// Pet carrier, 12x9, with a grille; `open` swings the door aside, `peek` shows the kitten's face.
+function carrier(x, y, { open = false, peek = false } = {}) {
+  x = Math.round(x); y = Math.round(y);
+  rect(x + 3, y - 2, 6, 1, PAL.k); rect(x + 3, y - 2, 1, 2, PAL.k); rect(x + 8, y - 2, 1, 2, PAL.k);
+  rect(x, y, 12, 9, PAL.k);
+  rect(x + 1, y + 1, 10, 7, '#e86f7d');
+  rect(x + 7, y + 2, 4, 5, open ? '#3a2a30' : '#2a2238');
+  if (peek && !open) { rect(x + 7, y + 3, 4, 3, PAL.w); px(x + 8, y + 4, PAL.e); px(x + 10, y + 4, PAL.e); }
+  if (!open) for (let i = 0; i < 4; i += 2) rect(x + 7 + i, y + 2, 1, 5, '#b8b8c8');
+  else { rect(x + 12, y + 2, 1, 5, '#b8b8c8'); rect(x + 13, y + 2, 1, 5, '#b8b8c8'); }
 }
 
 // ---------- shared backdrops ----------
@@ -297,15 +379,6 @@ function skyline(t, seed, baseY, color, win, scroll = 0, minH = 20, maxH = 60) {
         if (hash(n * 13 + wy * 7 + wx * 3) > 0.62 && (beat + wx + wy) % 13 !== 0) rect(wx, wy, 2, 3, win);
   }
 }
-function rainDrops(t, amount, color = '#8796cf') {
-  const n = Math.round(110 * amount);
-  for (let i = 0; i < n; i++) {
-    const y = ((hash(i + 7) * 200 + t * 230) % 200) - 10;
-    const x = ((hash(i) * 380 - y * 0.3) % 360 + 360) % 360 - 20;
-    line(x, y, x - 1, y + 4, color);
-  }
-}
-
 // ---------- scene 1: title, night rooftops (0 - 8s) ----------
 function sceneTitle(t, lt) {
   vgrad(0, 150, ['#0b0920', '#1d1846', '#3f2d6e', '#6b3f7a']);
@@ -319,98 +392,127 @@ function sceneTitle(t, lt) {
   sprite(blink ? KIT_SIT_BLINK : KIT_SIT, 238, 103);
 }
 function overlayTitle(t, lt) {
-  const word = '雪球和我';
-  [...word].forEach((ch, i) => {
+  const word = [...'冬冬和我们'];
+  word.forEach((ch, i) => {
     const k = prog(lt, 1 + i * BEAT, 1.4 + i * BEAT);
     if (k <= 0) return;
     const y = 270 - (1 - easeOutBack(k)) * 40;
-    const x = 640 - 192 + i * 96 + 48;
+    const x = 640 - word.length * 48 + i * 96 + 48;
     pixelText(ch, x + 6, y + 6, 96, '#1e1a2e', 'center', 1);
     pixelText(ch, x, y, 96, '#fbf8f4', 'center', 1);
   });
-  pixelText('一只白色金吉拉的故事', 640, 340, 32, '#d9d0ff', 'center', prog(lt, 3.2, 3.8));
-  pixelText('♪ PIXEL MV ♪', 640, 390, 32, '#ffd76a', 'center', prog(lt, 4.0, 4.6) * (Math.floor(lt * 2) % 2 ? 1 : 0.7));
+  pixelText('一只白色金吉拉的故事', 640, 356, 32, '#d9d0ff', 'center', prog(lt, 3.6, 4.2));
+  pixelText('♪ PIXEL MV ♪', 640, 404, 32, '#ffd76a', 'center', prog(lt, 4.4, 5.0) * (Math.floor(lt * 2) % 2 ? 1 : 0.7));
 }
 
-// ---------- scene 2: rainy night, the box (8 - 16s) ----------
-function sceneRain(t, lt) {
-  vgrad(0, 150, ['#10152b', '#1a2140', '#26304f']);
-  skyline(t, 21, 150, '#1c2340', '#3d4a7a', 0, 30, 90);
-  rect(0, 150, LW, 30, '#262b40');
-  rect(0, 150, LW, 2, '#3a4060');
-  for (let i = 0; i < 9; i++) {   // puddle glints
-    const x = Math.floor(hash(i + 3) * 300), y = 156 + Math.floor(hash(i + 4) * 20);
-    if ((Math.floor(t / BEAT) + i) % 3) rect(x, y, 6 + (i % 3) * 3, 1, '#4a5584');
+// ---------- shared daytime street in front of the house (scenes 2 and 3) ----------
+const STREET_Y = 132;   // where people's feet touch the pavement
+function street(t) {
+  vgrad(0, 120, ['#6fbdf2', '#a9dcff', '#d6f0ff']);
+  for (let i = 0; i < 3; i++) {   // drifting clouds
+    const cx = ((hash(i + 40) * 360 + t * 4) % 380) - 30, cy = 18 + i * 14;
+    disc(cx, cy, 5, '#ffffff'); disc(cx + 7, cy - 2, 6, '#ffffff'); disc(cx + 14, cy, 4, '#ffffff');
   }
-  // street lamp with a dithered light cone
-  rect(262, 66, 2, 84, '#0f0d1c');
-  rect(250, 66, 14, 2, '#0f0d1c');
-  rect(248, 68, 6, 3, '#ffe9a8');
-  for (let y = 71; y < 150; y++) {
-    const half = (y - 71) * 0.33;
-    drect(251 - half, y, half * 2, 1, '#3e4772', 0.55);
+  for (let x = 0; x < LW; x++) {
+    const h = 108 + Math.round(5 * Math.sin(x / 26) + 3 * Math.sin(x / 9));
+    rect(x, h, 1, STREET_Y - h, '#8fcf6a');
   }
-  drect(222, 150, 58, 4, '#4a5584', 0.6);
-  // the box with the kitten inside
-  const bx = 214, by = 134;
-  line(bx, by, bx - 6, by - 6, PAL.N); line(bx + 1, by, bx - 5, by - 6, PAL.N);
-  const blink = lt > 4.6 && lt < 4.75 || (lt % 3 < 0.12);
-  sprite(blink ? KIT_SIT_BLINK : KIT_SIT, bx + 7, by - 10);
-  rect(bx, by, 28, 16, PAL.n);
-  rect(bx, by, 28, 2, PAL.N);
-  rect(bx, by + 14, 28, 2, PAL.N);
-  line(bx + 27, by, bx + 33, by - 5, PAL.N); line(bx + 26, by, bx + 32, by - 5, PAL.N);
-  // the owner walks in with an umbrella and stops
-  const walking = lt < 4.5;
-  const ox = lerp(-16, 172, easeOutCubic(prog(lt, 0, 4.5)));
-  const frame = walking ? Math.floor(lt / (BEAT / 2)) : 1;
-  owner(ox, 126, { pose: walking ? 'walk' : 'stand', frame });
-  umbrella(ox + 13, 112);
-  if (lt > 4.6 && lt < 6.2) sprite(BANG, ox + 1, 104 - (lt < 4.8 ? 2 : 0));
-  if (lt > 5.6) {
-    const hy = 116 - (lt - 5.6) * 6;
-    if (hy > 96 || Math.floor(lt * 6) % 2) sprite(HEART, bx + 10, hy);
+  // trees
+  for (const tx of [26, 150]) {
+    rect(tx, 100, 4, 32, '#6b4428');
+    disc(tx + 2, 94, 11, '#4caf50'); disc(tx - 5, 99, 6, '#5cc35c'); disc(tx + 9, 99, 6, '#3c9f40');
   }
-  rainDrops(t, 1);
+  // the house
+  const hx = 200;
+  rect(hx, 84, 100, 48, '#f6dfb8');
+  for (let y = 88; y < 132; y += 6) rect(hx, y, 100, 1, '#ecd0a2');
+  for (let j = 0; j < 26; j++) rect(hx - 6 + j * 2, 84 - j, 112 - j * 4, 1, j % 4 ? '#c65a42' : '#a8483a');
+  rect(hx + 12, 96, 22, 18, '#fff7ea'); rect(hx + 14, 98, 18, 14, '#9be0ff'); rect(hx + 22, 98, 2, 14, '#fff7ea');
+  rect(hx + 70, 104, 16, 28, '#8a5a3a'); rect(hx + 72, 106, 12, 24, '#9c6a44'); px(hx + 82, 118, '#ffd76a');
+  rect(hx + 66, 130, 24, 2, '#c9b8a0');
+  // pavement and road
+  rect(0, STREET_Y, LW, 5, '#d9d0c8');
+  rect(0, STREET_Y + 5, LW, 2, '#a89f98');
+  rect(0, STREET_Y + 7, LW, LH - STREET_Y - 7, '#6b6f7d');
+  for (let x = 4; x < LW; x += 24) rect(x, 150, 12, 2, '#e8e8f0');
 }
 
-// ---------- scene 3: carrying the kitten home (16 - 24s) ----------
-function sceneHome(t, lt) {
-  const clear = prog(lt, 3.5, 6);
-  vgrad(0, 150, clear > 0.5 ? ['#0b0920', '#1d1846', '#3f2d6e'] : ['#10152b', '#1a2140', '#26304f']);
-  if (clear > 0) {
-    stars(t, Math.round(50 * clear), 90, 200);
-    moon(60, lerp(60, 34, easeOutCubic(clear)), 12);
+// ---------- scene 2: the cattery van arrives (8 - 16s) ----------
+const SELLER_STOP = 182;
+function sceneArrive(t, lt) {
+  street(t);
+  const moving = lt < 3;
+  const vx = lerp(-70, 40, easeOutCubic(prog(lt, 0, 3)));
+  // the couple waiting by the door, she waves as the van pulls up
+  const beat = Math.floor(lt / BEAT);
+  owner(244, STREET_Y - 24, { flip: true });
+  owner(228, STREET_Y - 24, { who: 'she', flip: true, wave: lt > 1 && lt < 5.5, frame: beat });
+  // the seller climbs out and carries the kitten over
+  if (lt > 3.6) {
+    const walking = lt < 6;
+    const sx = lerp(94, SELLER_STOP, prog(lt, 3.6, 6));
+    const frame = walking ? Math.floor(lt / (BEAT / 2)) : 1;
+    owner(sx, STREET_Y - 24, { pose: walking ? 'walk' : 'stand', frame, pal: SELLER });
+    rect(sx + 2, STREET_Y - 25, 9, 2, '#e2504c');   // cap
+    carrier(sx + 10, STREET_Y - 13, { peek: lt > 6.3 });
   }
-  const scroll = lt * 22;
-  skyline(t, 31, 150, '#1c2340', '#3d4a7a', scroll * 0.4, 30, 80);
-  rect(0, 150, LW, 30, '#262b40');
-  rect(0, 150, LW, 2, '#3a4060');
-  for (let n = Math.floor(scroll / 110) - 1; n < Math.floor(scroll / 110) + 4; n++) {   // passing lamps
-    const lx = n * 110 - scroll + 40;
-    rect(lx, 76, 2, 74, '#0f0d1c');
-    rect(lx - 3, 74, 8, 3, '#ffe9a8');
-    for (let y = 77; y < 150; y++) drect(lx + 1 - (y - 77) * 0.25, y, (y - 77) * 0.5, 1, '#3e4772', 0.5);
+  van(vx, STREET_Y - 6, t, moving);
+  if (lt > 6.6) {
+    const hy = STREET_Y - 30 - (lt - 6.6) * 8;
+    if (lt < 7.6 || Math.floor(lt * 6) % 2) sprite(HEART, SELLER_STOP + 13, hy);
   }
-  // a cosy house sliding in at the end
-  const hx = 340 - prog(lt, 5, 8) * 120;
-  rect(hx, 104, 70, 46, '#3b2f55');
-  for (let j = 0; j < 22; j++) rect(hx - 6 + j * 1.6, 104 - j, 82 - j * 3.2, 1, '#5a3a5e');
-  rect(hx + 10, 116, 16, 14, '#ffd76a'); rect(hx + 17, 116, 2, 14, '#3b2f55');
-  rect(hx + 44, 120, 14, 30, '#2a2040'); px(hx + 55, 135, '#ffd76a');
-  drect(hx + 6, 150, 26, 4, '#ffd76a', 0.3);
+}
+function overlayArrive(t, lt) {
+  if (lt > 3.0 && lt < 3.9) {   // two honks from the van
+    const a = Math.floor((lt - 3.0) / 0.22) % 2 === 0 ? 1 : 0.4;
+    pixelText('嘀嘀！', 470, 440, 32, '#ffd76a', 'center', a);
+  }
+}
 
-  const frame = Math.floor(lt / (BEAT / 2));
-  owner(150, 126, { pose: 'walk', frame, holding: true });
-  if (lt < 4) umbrella(163, 112);
-  if (lt > 4.6) {
-    for (let i = 0; i < 4; i++) {
-      const k = (lt - 4.6 - i * BEAT * 2) / 2;
+// ---------- scene 3: welcoming the kitten home (16 - 24s) ----------
+function sceneWelcome(t, lt) {
+  street(t);
+  const beat = Math.floor(lt / BEAT);
+  // the carrier on the pavement; the door opens and the kitten steps out
+  const cx = 196;
+  carrier(cx, STREET_Y - 9, { open: lt > 0.8, peek: lt < 0.8 });
+  const out = prog(lt, 1.0, 2.2);
+  const held = lt > 2.5;
+  if (lt > 1.0 && !held) {
+    sprite(KIT_WALK[Math.floor(lt / (BEAT / 2)) % 2], cx + 10 + out * 6, STREET_Y - 11);
+  }
+  // the seller waves goodbye and walks back to the van
+  if (lt < 4.3) {
+    const leaving = lt > 2.6;
+    const sx = leaving ? lerp(SELLER_STOP - 12, 92, prog(lt, 2.6, 4.3)) : SELLER_STOP - 12;
+    owner(sx, STREET_Y - 24, { pose: leaving ? 'walk' : 'stand', frame: Math.floor(lt / (BEAT / 2)),
+      flip: leaving, wave: !leaving && lt > 1.2, pal: SELLER });
+    rect(sx + (leaving ? 1 : 2), STREET_Y - 25, 9, 2, '#e2504c');
+  }
+  // the couple: she picks the kitten up, they both stay close
+  owner(222, STREET_Y - 24, { who: 'she', flip: true, holding: held });
+  owner(238, STREET_Y - 24, { flip: true, wave: lt > 3 && lt < 5, frame: beat });
+  if (lt > 3) {
+    for (let i = 0; i < 6; i++) {
+      const k = (lt - 3 - i * BEAT * 2) / 2.2;
       if (k < 0 || k > 1) continue;
-      sprite(HEART, 152 + Math.sin(k * 6 + i) * 6, 128 - k * 30);
+      sprite(HEART, 228 + Math.sin(k * 6 + i) * 7, STREET_Y - 28 - k * 34);
     }
   }
-  rainDrops(t, 1 - prog(lt, 2, 4.5));
+  // the van drives off
+  const gone = prog(lt, 4.6, 7.6);
+  van(40 + gone * gone * 330, STREET_Y - 6, t, gone > 0 && gone < 1);
+}
+function overlayWelcome(t, lt) {
+  const k = easeOutBack(prog(lt, 4.0, 4.5));
+  if (k <= 0) return;
+  ctx.save();
+  ctx.translate(894, 300);
+  ctx.scale(k, k);
+  pixelText('冬冬', 4, 4, 64, '#1e1a2e', 'center', 1);
+  pixelText('冬冬', 0, 0, 64, '#fbf8f4', 'center', 1);
+  if (Math.floor(lt * 4) % 2) { pixelText('✦', -88, -24, 32, '#ffd76a', 'center', 1); pixelText('✦', 88, 20, 32, '#ffd76a', 'center', 1); }
+  ctx.restore();
 }
 
 // ---------- scene 4: chasing yarn in the room (24 - 32s) ----------
@@ -454,7 +556,8 @@ function scenePlay(t, lt) {
   const kx = yx - dir * 26 - 8;
   sprite(KIT_WALK[Math.floor(lt / (BEAT / 2)) % 2], kx, 139 - hop, { flip: dir < 0 });
   // the owner watching and humming
-  owner(268, 126, { flip: true });
+  owner(270, 126, { flip: true });
+  owner(250, 126, { who: 'she', flip: true, wave: true, frame: Math.floor(lt / BEAT) });
   for (let i = 0; i < 4; i++) {
     const k = (lt - i * BEAT * 2) % (BEAT * 8) / 2;
     if (k < 0 || k > 1) continue;
@@ -586,14 +689,15 @@ function sceneSunset(t, lt) {
     rect(x, h2, 1, LH - h2, '#3b2346');
   }
   // bench, owner and the grown-up cat side by side
-  rect(118, 128, 60, 2, '#5a3a2e'); rect(118, 136, 60, 3, '#5a3a2e');
-  rect(122, 139, 2, 8, '#5a3a2e'); rect(172, 139, 2, 8, '#5a3a2e'); rect(120, 128, 2, 8, '#5a3a2e'); rect(174, 128, 2, 8, '#5a3a2e');
-  owner(124, 117, { pose: 'sit' });
-  sprite((lt % 3) < 0.12 ? CAT_SIT_BLINK : CAT_SIT, 150, 119);
+  rect(100, 128, 66, 2, '#5a3a2e'); rect(100, 136, 66, 3, '#5a3a2e');
+  rect(104, 139, 2, 8, '#5a3a2e'); rect(160, 139, 2, 8, '#5a3a2e'); rect(102, 128, 2, 8, '#5a3a2e'); rect(162, 128, 2, 8, '#5a3a2e');
+  owner(104, 117, { who: 'she', pose: 'sit' });
+  owner(121, 117, { pose: 'sit' });
+  sprite((lt % 3) < 0.12 ? CAT_SIT_BLINK : CAT_SIT, 140, 119);
   for (let i = 0; i < 8; i++) {
     const k = (lt - 0.5 - i * BEAT * 2) / 2.4;
     if (k < 0 || k > 1) continue;
-    const hx = 148 + Math.sin(k * 7 + i) * 8, hy = 110 - k * 60;
+    const hx = 128 + Math.sin(k * 7 + i) * 10, hy = 110 - k * 60;
     if (k < 0.8 || Math.floor(lt * 8) % 2) sprite(HEART, hx, hy);
   }
 }
@@ -612,14 +716,15 @@ function sceneEnd(t, lt) {
   rect(118, 96, 84, 54, '#241c40');
   for (let j = 0; j < 26; j++) rect(160 - j * 2.1, 70 + j, j * 4.2, 1, '#2f2350');
   rect(176, 72, 8, 14, '#241c40');
-  rect(138, 108, 44, 28, '#ffd76a');
-  CLIP = [138, 108, 182, 136];
-  owner(146, 112, { pal: solid('#6b4a2a') });
-  sprite(CAT_SIT, 162, 119, { pal: solid('#6b4a2a') });
+  rect(132, 108, 58, 28, '#ffd76a');
+  CLIP = [132, 108, 190, 136];
+  owner(134, 112, { who: 'she', pal: solid('#6b4a2a') });
+  owner(149, 112, { pal: solid('#6b4a2a') });
+  sprite(CAT_SIT, 167, 119, { pal: solid('#6b4a2a') });
   CLIP = null;
-  rect(159, 108, 2, 28, '#241c40'); rect(138, 121, 44, 2, '#241c40');
-  drect(132, 150, 56, 6, '#ffd76a', 0.25);
-  rect(124, 126, 10, 24, '#1a1430');
+  rect(160, 108, 2, 28, '#241c40'); rect(132, 121, 58, 2, '#241c40');
+  drect(128, 150, 66, 6, '#ffd76a', 0.25);
+  rect(120, 126, 9, 24, '#1a1430');
   fadeToBlack(prog(lt, 6.2, 7.8));
 }
 function overlayEnd(t, lt) {
@@ -627,8 +732,8 @@ function overlayEnd(t, lt) {
   const k = easeOutBack(prog(lt, 4.3, 4.8));
   ctx.save();
   ctx.translate(640, 200); ctx.scale(k, k);
-  pixelText('雪球 & 我', 5, 5, 96, '#1e1a2e', 'center', fade);
-  pixelText('雪球 & 我', 0, 0, 96, '#fbf8f4', 'center', fade);
+  pixelText('冬冬 & 我们', 5, 5, 96, '#1e1a2e', 'center', fade);
+  pixelText('冬冬 & 我们', 0, 0, 96, '#fbf8f4', 'center', fade);
   ctx.restore();
   pixelText('THE END', 640, 270, 32, '#ffd76a', 'center', prog(lt, 5.2, 5.6) * fade);
 }
@@ -669,13 +774,13 @@ function dialog(str, lt, start, end) {
 // ---------- timeline ----------
 const SCENES = [
   { draw: sceneTitle, overlay: overlayTitle },
-  { draw: sceneRain, text: '那天下着雨，你在纸箱里望着我。' },
-  { draw: sceneHome, text: '我把你抱回了家，给你取名叫「雪球」。' },
+  { draw: sceneArrive, text: '那天，猫舍的卖家开车把你送到了家门口。', overlay: overlayArrive },
+  { draw: sceneWelcome, text: '我们一起接回了你，给你取名叫「冬冬」。', overlay: overlayWelcome },
   { draw: scenePlay, text: '你追着毛线球，跑遍了整个房间。' },
-  { draw: sceneNight, text: '加班的深夜，你总在键盘旁陪着我。' },
+  { draw: sceneNight, text: '加班的深夜，你总趴在键盘旁陪着他。' },
   { draw: sceneSeasons, text: '春夏秋冬，你一天天长大。', overlay: overlaySeasons },
-  { draw: sceneSunset, text: '谢谢你，来到我的生命里。' },
-  { draw: sceneEnd, text: '以后的每一天，也请多多指教。', textEnd: 4.0, overlay: overlayEnd },
+  { draw: sceneSunset, text: '谢谢你，来到我们的生命里。' },
+  { draw: sceneEnd, text: '以后的每一天，我们都在一起。', textEnd: 4.0, overlay: overlayEnd },
 ];
 
 // Pixelated iris wipe between scenes, like an old RPG.
@@ -712,7 +817,7 @@ window.FPS = FPS;
 window.DURATION = DURATION;
 window.renderFrame = renderFrame;
 window.ready = (async () => {
-  await document.fonts.load(`32px ${PIXEL}`, '雪球和我').catch(() => {});
+  await document.fonts.load(`32px ${PIXEL}`, '冬冬和我们').catch(() => {});
   renderFrame(0);
   return true;
 })();
