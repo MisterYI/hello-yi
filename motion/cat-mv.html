@@ -328,6 +328,10 @@ function van(x, y, t, moving) {
   disc(x + 18, y + 8, 2, '#ff8fb3');
   rect(x + 14, y + 3, 2, 2, '#ff8fb3'); rect(x + 17, y + 2, 2, 2, '#ff8fb3'); rect(x + 20, y + 3, 2, 2, '#ff8fb3');
   rect(x + 50, y + 15, 2, 2, '#ffd76a'); rect(x - 1, y + 15, 1, 3, '#e2504c');
+  for (let i = 0; i < 46; i++) {   // headlight beam
+    const spread = i * 0.22;
+    drect(x + 52 + i, y + 15 - spread * 0.4, 1, 2 + spread, '#fff3c4', 0.35 * (1 - i / 46));
+  }
   for (const wx of [x + 10, x + 42]) {
     disc(wx, y + 20, 4, PAL.k);
     disc(wx, y + 20, 1, '#b8b8c8');
@@ -405,36 +409,46 @@ function overlayTitle(t, lt) {
   pixelText('♪ PIXEL MV ♪', 640, 404, 32, '#ffd76a', 'center', prog(lt, 4.4, 5.0) * (Math.floor(lt * 2) % 2 ? 1 : 0.7));
 }
 
-// ---------- shared daytime street in front of the house (scenes 2 and 3) ----------
+// ---------- shared evening street in front of the house (scenes 2 and 3) ----------
 const STREET_Y = 132;   // where people's feet touch the pavement
 function street(t) {
-  vgrad(0, 120, ['#6fbdf2', '#a9dcff', '#d6f0ff']);
-  for (let i = 0; i < 3; i++) {   // drifting clouds
-    const cx = ((hash(i + 40) * 360 + t * 4) % 380) - 30, cy = 18 + i * 14;
-    disc(cx, cy, 5, '#ffffff'); disc(cx + 7, cy - 2, 6, '#ffffff'); disc(cx + 14, cy, 4, '#ffffff');
-  }
+  // evening: starry sky, moon, warm lights in the house
+  vgrad(0, 120, ['#0b0920', '#1d1846', '#3f2d6e', '#5a3f7a']);
+  stars(t, 50, 100, 600);
+  moon(56, 28, 11);
   for (let x = 0; x < LW; x++) {
     const h = 108 + Math.round(5 * Math.sin(x / 26) + 3 * Math.sin(x / 9));
-    rect(x, h, 1, STREET_Y - h, '#8fcf6a');
+    rect(x, h, 1, STREET_Y - h, '#22303f');
   }
-  // trees
-  for (const tx of [26, 150]) {
-    rect(tx, 100, 4, 32, '#6b4428');
-    disc(tx + 2, 94, 11, '#4caf50'); disc(tx - 5, 99, 6, '#5cc35c'); disc(tx + 9, 99, 6, '#3c9f40');
-  }
-  // the house
+  // tree
+  rect(26, 100, 4, 32, '#2e221c');
+  disc(28, 94, 11, '#264a36'); disc(21, 99, 6, '#2f5a40'); disc(35, 99, 6, '#1f3e2e');
+  // the house, windows lit
   const hx = 200;
-  rect(hx, 84, 100, 48, '#f6dfb8');
-  for (let y = 88; y < 132; y += 6) rect(hx, y, 100, 1, '#ecd0a2');
-  for (let j = 0; j < 26; j++) rect(hx - 6 + j * 2, 84 - j, 112 - j * 4, 1, j % 4 ? '#c65a42' : '#a8483a');
-  rect(hx + 12, 96, 22, 18, '#fff7ea'); rect(hx + 14, 98, 18, 14, '#9be0ff'); rect(hx + 22, 98, 2, 14, '#fff7ea');
-  rect(hx + 70, 104, 16, 28, '#8a5a3a'); rect(hx + 72, 106, 12, 24, '#9c6a44'); px(hx + 82, 118, '#ffd76a');
-  rect(hx + 66, 130, 24, 2, '#c9b8a0');
+  rect(hx, 84, 100, 48, '#4a3d5e');
+  for (let y = 88; y < 132; y += 6) rect(hx, y, 100, 1, '#43375a');
+  for (let j = 0; j < 26; j++) rect(hx - 6 + j * 2, 84 - j, 112 - j * 4, 1, j % 4 ? '#6a3346' : '#56293a');
+  rect(hx + 12, 96, 22, 18, '#2e2540'); rect(hx + 14, 98, 18, 14, '#ffd76a'); rect(hx + 22, 98, 2, 14, '#2e2540');
+  rect(hx + 70, 104, 16, 28, '#3a2a24'); rect(hx + 72, 106, 12, 24, '#5a3d2c'); px(hx + 82, 118, '#ffd76a');
+  rect(hx + 66, 130, 24, 2, '#3a3448');
+  // porch light over the door
+  rect(hx + 76, 98, 4, 3, '#ffe9a8');
+  for (let y = 101; y < STREET_Y + 5; y++) {
+    const half = (y - 101) * 0.6;
+    drect(hx + 78 - half, y, half * 2, 1, '#5e5070', 0.3);
+  }
+  // street lamp lighting the pavement where the hand-over happens
+  rect(150, 70, 2, 62, '#0f0d1c'); rect(142, 70, 10, 2, '#0f0d1c'); rect(140, 72, 6, 3, '#ffe9a8');
+  for (let y = 75; y < STREET_Y + 5; y++) {
+    const half = (y - 75) * 0.45;
+    drect(143 - half, y, half * 2, 1, '#55507a', 0.45);
+  }
   // pavement and road
-  rect(0, STREET_Y, LW, 5, '#d9d0c8');
-  rect(0, STREET_Y + 5, LW, 2, '#a89f98');
-  rect(0, STREET_Y + 7, LW, LH - STREET_Y - 7, '#6b6f7d');
-  for (let x = 4; x < LW; x += 24) rect(x, 150, 12, 2, '#e8e8f0');
+  rect(0, STREET_Y, LW, 5, '#4a4660');
+  drect(100, STREET_Y, 90, 5, '#6a6488', 0.5);
+  rect(0, STREET_Y + 5, LW, 2, '#3a3650');
+  rect(0, STREET_Y + 7, LW, LH - STREET_Y - 7, '#24222f');
+  for (let x = 4; x < LW; x += 24) rect(x, 150, 12, 2, '#5a5870');
 }
 
 // ---------- scene 2: the cattery van arrives (8 - 16s) ----------
@@ -774,7 +788,7 @@ function dialog(str, lt, start, end) {
 // ---------- timeline ----------
 const SCENES = [
   { draw: sceneTitle, overlay: overlayTitle },
-  { draw: sceneArrive, text: '那天，猫舍的卖家开车把你送到了家门口。', overlay: overlayArrive },
+  { draw: sceneArrive, text: '那天晚上，猫舍的卖家开车把你送到了家门口。', overlay: overlayArrive },
   { draw: sceneWelcome, text: '我们一起接回了你，给你取名叫「冬冬」。', overlay: overlayWelcome },
   { draw: scenePlay, text: '你追着毛线球，跑遍了整个房间。' },
   { draw: sceneNight, text: '加班的深夜，你总趴在键盘旁陪着他。' },
