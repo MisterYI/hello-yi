@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hello-yi motion</title>
+<title>Agent 101</title>
 <style>
   html, body { margin: 0; height: 100%; background: #111; }
   body { display: grid; place-items: center; }
@@ -13,23 +13,24 @@
 <body>
 <canvas id="c" width="1280" height="720"></canvas>
 <script>
-// Motion graphics demo. Every frame is a pure function of time t (seconds):
-// no Date.now, no Math.random, no state carried between frames. That is what
-// lets render.mjs seek to any frame and get the exact same picture every time.
+// "How an AI agent works" explainer. Every frame is a pure function of time t
+// (seconds): no Date.now, no Math.random, no state carried between frames.
+// That is what lets render.mjs seek to any frame and get the same picture.
 
-const W = 1280, H = 720, FPS = 30, DURATION = 15.5;
+const W = 1280, H = 720, FPS = 30, DURATION = 48;
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 
-const SANS = '"Inter", "Inter Display", "DejaVu Sans", sans-serif';
-const DISPLAY = '"Inter Display Black", "Inter Display", "Inter", sans-serif';
-const SERIF = '"DejaVu Serif", "Liberation Serif", serif';
-const MONO = '"DejaVu Sans Mono", "Liberation Mono", monospace';
+// Inter has no CJK glyphs, so Chinese characters fall back to WenQuanYi.
+const CJK = '"WenQuanYi Zen Hei"';
+const SANS = `"Inter", ${CJK}, sans-serif`;
+const DISPLAY = `"Inter Display Black", "Inter Display", "Inter", ${CJK}, sans-serif`;
+const MONO = `"DejaVu Sans Mono", "WenQuanYi Zen Hei Mono", ${CJK}, monospace`;
 
 const C = {
-  orange: '#F2482B', ink: '#111111', paper: '#FAFAF7', cream: '#F4EFE3',
+  orange: '#F2482B', ink: '#111111', paper: '#FAFAF7', cream: '#F4EFE3', night: '#121316',
   blue: '#2338F5', red: '#E5322D', yellow: '#FFC531', pink: '#FF5DA2',
-  teal: '#18C29C', purple: '#8B5CF6', grid: 'rgba(0,0,0,0.07)',
+  teal: '#18C29C', purple: '#8B5CF6', sky: '#5B7CFF', gray: '#ECECEA',
 };
 
 // ---------- math helpers ----------
@@ -38,7 +39,6 @@ const lerp = (a, b, k) => a + (b - a) * k;
 const prog = (t, a, b) => clamp((t - a) / (b - a));
 const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
 const easeInOutCubic = k => k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-const easeInCubic = k => k * k * k;
 const easeOutBack = k => { const s = 1.70158; return 1 + (s + 1) * Math.pow(k - 1, 3) + s * Math.pow(k - 1, 2); };
 const easeOutElastic = k => k === 0 || k === 1 ? k
   : Math.pow(2, -10 * k) * Math.sin((k * 10 - 0.75) * (2 * Math.PI) / 3) + 1;
@@ -77,6 +77,22 @@ function text(str, x, y, { font, color, align = 'left', base = 'alphabetic', alp
   ctx.restore();
 }
 
+// Break a string into lines no wider than maxW. Character-level breaking is
+// right for Chinese and good enough for the short Latin fragments used here.
+function wrap(str, maxW, font) {
+  ctx.save(); ctx.font = font;
+  const lines = [];
+  let line = '';
+  for (const ch of str) {
+    if (line && ctx.measureText(line + ch).width > maxW) { lines.push(line); line = ''; }
+    line += ch;
+  }
+  if (line) lines.push(line);
+  const width = Math.max(...lines.map(l => ctx.measureText(l).width));
+  ctx.restore();
+  return { lines, width };
+}
+
 function hud(t, color, label) {
   ctx.save();
   ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.globalAlpha = 0.85;
@@ -89,17 +105,22 @@ function hud(t, color, label) {
   if (label) text(label, 60, 62, { font: `600 15px ${MONO}`, color, alpha: 0.75 });
 }
 
-function arrow(x1, y1, x2, y2, color, k = 1) {
+function heading(str, lt, color) {
+  const k = easeOutCubic(prog(lt, 0.1, 0.6));
+  text(str, 60 + (1 - k) * -20, 132, { font: `800 44px ${SANS}`, color, alpha: k });
+}
+
+function arrow(x1, y1, x2, y2, color, k = 1, width = 2.5) {
   if (k <= 0) return;
   const x = lerp(x1, x2, k), y = lerp(y1, y2, k);
   ctx.save();
-  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width; ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x, y); ctx.stroke();
   const a = Math.atan2(y2 - y1, x2 - x1);
   ctx.beginPath();
   ctx.moveTo(x, y);
-  ctx.lineTo(x - 12 * Math.cos(a - 0.45), y - 12 * Math.sin(a - 0.45));
-  ctx.lineTo(x - 12 * Math.cos(a + 0.45), y - 12 * Math.sin(a + 0.45));
+  ctx.lineTo(x - 13 * Math.cos(a - 0.45), y - 13 * Math.sin(a - 0.45));
+  ctx.lineTo(x - 13 * Math.cos(a + 0.45), y - 13 * Math.sin(a + 0.45));
   ctx.closePath(); ctx.fill();
   ctx.restore();
 }
@@ -112,334 +133,461 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-// ---------- scene 1: title slam (0 - 3.4s) ----------
+// Pop-in transform around a pivot point: scale from 0 with overshoot.
+function popAt(x, y, k, fn) {
+  if (k <= 0) return;
+  ctx.save();
+  ctx.translate(x, y);
+  const s = easeOutBack(k);
+  ctx.scale(s, s);
+  ctx.globalAlpha *= clamp(k * 3);
+  fn();
+  ctx.restore();
+}
+
+// ---------- scene 1: title (0 - 5s) ----------
 function sceneTitle(t) {
+  const lt = t;
   bg(C.orange);
   dotGrid('rgba(0,0,0,0.10)');
 
-  const word = 'HELLO YI';
-  ctx.font = `900 210px ${DISPLAY}`;
+  text('AGENT 101', W / 2, 190, {
+    font: `700 20px ${MONO}`, color: C.ink, align: 'center', alpha: prog(lt, 0.1, 0.5),
+  });
+
+  const word = 'AI Agent';
+  const big = `900 190px ${DISPLAY}`;
+  ctx.font = big;
   const widths = [...word].map(ch => ctx.measureText(ch).width);
   const total = widths.reduce((a, b) => a + b, 0);
   let x = (W - total) / 2;
-  const baseY = 400;
   [...word].forEach((ch, i) => {
-    const k = prog(t, 0.15 + i * 0.07, 0.75 + i * 0.07);
-    const y = baseY + (1 - easeOutBack(k)) * -260;
+    const k = prog(lt, 0.2 + i * 0.06, 0.8 + i * 0.06);
+    const y = 370 + (1 - easeOutBack(k)) * -260;
     const rot = (1 - easeOutCubic(k)) * (hash(i) - 0.5) * 0.8;
     ctx.save();
     ctx.globalAlpha = clamp(k * 3);
     ctx.translate(x + widths[i] / 2, y);
     ctx.rotate(rot);
-    text(ch, 0, 0, { font: `900 210px ${DISPLAY}`, color: C.ink, align: 'center' });
+    text(ch, 0, 0, { font: big, color: C.ink, align: 'center' });
     ctx.restore();
     x += widths[i];
   });
 
-  // underline wipe
-  const u = easeInOutCubic(prog(t, 1.0, 1.6));
+  const u = easeInOutCubic(prog(lt, 1.0, 1.6));
   ctx.fillStyle = C.ink;
-  ctx.fillRect((W - total) / 2, 440, total * u, 10);
+  ctx.fillRect((W - total) / 2, 405, total * u, 10);
 
-  // subtitle
-  const s = easeOutCubic(prog(t, 1.4, 2.1));
-  text('motion designer', W / 2, 515 + (1 - s) * 30, {
-    font: `italic 46px ${SERIF}`, color: '#FFF4EE', align: 'center', alpha: s,
+  const s = easeOutCubic(prog(lt, 1.3, 2.0));
+  text('是怎么工作的？', W / 2, 500 + (1 - s) * 30, {
+    font: `700 64px ${SANS}`, color: '#FFFFFF', align: 'center', alpha: s,
   });
-  text('— made with code, rendered frame by frame —', W / 2, 570, {
-    font: `500 16px ${MONO}`, color: C.ink, align: 'center', alpha: prog(t, 1.9, 2.4) * 0.7,
+  text('一分钟看懂智能体的原理', W / 2, 565, {
+    font: `500 24px ${SANS}`, color: C.ink, align: 'center', alpha: prog(lt, 2.0, 2.6) * 0.8,
   });
 
-  hud(t, C.ink, 'HELLO-YI // 01 TITLE');
+  hud(t, C.ink, 'AGENT 101 // 00 INTRO');
 }
 
-// ---------- scene 2: bouncing ball, squash & stretch (3.4 - 7.0s) ----------
-function ballState(lt) {
-  // Three bounces with decaying height, moving left to right.
-  const bounces = [{ d: 1.0, h: 330 }, { d: 0.8, h: 210 }, { d: 0.6, h: 120 }, { d: 0.5, h: 60 }];
-  const groundY = 560, r = 34;
-  let acc = 0;
-  for (const b of bounces) {
-    if (lt < acc + b.d) {
-      const k = (lt - acc) / b.d;              // 0..1 within this hop
-      const height = 4 * b.h * k * (1 - k);    // parabola
-      const vy = 4 * b.h * (1 - 2 * k);        // vertical speed (signed)
-      return { k, y: groundY - r - height, vy, groundY, r };
-    }
-    acc += b.d;
+// ---------- scene 2: chatbot vs agent (5 - 11.5s) ----------
+function typingDots(x, y, lt, color) {
+  for (let i = 0; i < 3; i++) {
+    const b = Math.max(0, Math.sin((lt * 8 - i * 0.9)));
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(x + i * 18, y - b * 6, 5, 0, Math.PI * 2); ctx.fill();
   }
-  return { k: 1, y: groundY - r, vy: 0, groundY, r };
 }
 
-function sceneBounce(t) {
-  const lt = t - 3.4;
+// Chat bubble anchored at its top-left (align 'left') or top-right ('right').
+function bubble(x, y, str, k, { fill, color, align = 'left', maxW = 330 }) {
+  const font = `500 21px ${SANS}`;
+  const { lines, width } = wrap(str, maxW, font);
+  const pad = 16, lh = 31;
+  const w = width + pad * 2, h = lines.length * lh + pad * 2 - 6;
+  const left = align === 'left' ? x : x - w;
+  popAt(align === 'left' ? left : left + w, y + h / 2, k, () => {
+    const ox = align === 'left' ? 0 : -w;
+    ctx.fillStyle = fill;
+    roundRect(ox, -h / 2, w, h, 16); ctx.fill();
+    lines.forEach((l, i) => text(l, ox + pad, -h / 2 + pad + 21 + i * lh, { font, color }));
+  });
+  return h;
+}
+
+function chip(x, y, str, k, fill, color = '#FFFFFF') {
+  const font = `600 18px ${SANS}`;
+  ctx.save(); ctx.font = font; const w = ctx.measureText(str).width + 28; ctx.restore();
+  popAt(x + w / 2, y, k, () => {
+    ctx.fillStyle = fill;
+    roundRect(-w / 2, -18, w, 36, 18); ctx.fill();
+    text(str, 0, 7, { font, color, align: 'center' });
+  });
+  return w;
+}
+
+function sceneVersus(t) {
+  const lt = t - 5;
   bg(C.paper);
-  dotGrid('rgba(0,0,0,0.08)');
+  dotGrid('rgba(0,0,0,0.07)');
+  heading('聊天机器人 vs Agent', lt, C.ink);
 
-  const x0 = 170, x1 = 1110, dur = 2.9;
-  const ballX = lt => lerp(x0, x1, clamp(lt / dur));
-  const st = ballState(lt);
-  const { groundY, r } = st;
-
-  // ground
-  const g = easeOutCubic(prog(lt, 0, 0.4));
-  ctx.strokeStyle = C.ink; ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.moveTo(110, groundY); ctx.lineTo(110 + (W - 220) * g, groundY); ctx.stroke();
-  for (let i = 0; i < 9; i++) {
-    const tx = 150 + i * 125;
-    if (tx < 110 + (W - 220) * g) {
-      ctx.beginPath(); ctx.moveTo(tx, groundY + 8); ctx.lineTo(tx, groundY + 16); ctx.stroke();
-    }
-  }
-
-  // ghost trail: the ball where it was a moment ago
-  for (let j = 14; j >= 1; j--) {
-    const pt = lt - j * 0.06;
-    if (pt < 0) continue;
-    const ps = ballState(pt);
-    ctx.save();
-    ctx.globalAlpha = 0.28 * (1 - j / 15);
-    ctx.strokeStyle = C.blue; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(ballX(pt), ps.y, r, 0, Math.PI * 2); ctx.stroke();
-    ctx.restore();
-  }
-
-  // squash near the ground, stretch with speed
-  const nearGround = clamp(1 - (groundY - r - st.y) / 30);
-  const speed = Math.abs(st.vy) / 1320;
-  let sx = 1 + nearGround * 0.35 - speed * 0.12;
-  let sy = 1 - nearGround * 0.3 + speed * 0.22;
-  if (lt > dur) { sx = 1; sy = 1; }
-  const bx = ballX(lt);
-  ctx.save();
-  ctx.translate(bx, st.y + r * (1 - sy));
-  ctx.scale(sx, sy);
-  ctx.fillStyle = C.blue;
-  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-
-  // handwritten-style annotations
-  const ann = { font: `italic 600 24px ${SERIF}` };
-  const a1 = prog(lt, 0.3, 0.8);
-  text('slow in, slow out', 250, 170, { ...ann, color: C.blue, alpha: a1 });
-  arrow(330, 182, 380, 222, C.blue, easeOutCubic(prog(lt, 0.5, 0.9)));
-  const a2 = prog(lt, 1.0, 1.3);
-  text('squash!', 520, 640, { ...ann, color: C.red, alpha: a2 });
-  arrow(560, 612, 640, 572, C.red, easeOutCubic(prog(lt, 1.05, 1.35)));
-  const a3 = prog(lt, 1.3, 1.6);
-  text('stretch', 820, 300, { ...ann, color: C.blue, alpha: a3 });
-  arrow(860, 312, 820, 390, C.blue, easeOutCubic(prog(lt, 1.35, 1.65)));
-
-  text('Squash & Stretch', 60, 130, { font: `800 44px ${SANS}`, color: C.ink, alpha: prog(lt, 0.1, 0.5) });
-  hud(t, C.ink, 'HELLO-YI // 02 PRINCIPLES');
-}
-
-// ---------- scene 3: circle -> triangle morph (7.0 - 10.4s) ----------
-function shapePoint(i, n, shape, R) {
-  const u = i / n;
-  if (shape === 'circle') {
-    const a = u * Math.PI * 2 - Math.PI / 2;
-    return [R * Math.cos(a), R * Math.sin(a)];
-  }
-  // triangle: walk the perimeter at the same parameter u
-  const v = [0, 1, 2].map(k => {
-    const a = k * (Math.PI * 2 / 3) - Math.PI / 2;
-    return [R * 1.15 * Math.cos(a), R * 1.15 * Math.sin(a)];
-  });
-  const seg = Math.floor(u * 3), f = u * 3 - seg;
-  const A = v[seg % 3], B = v[(seg + 1) % 3];
-  return [lerp(A[0], B[0], f), lerp(A[1], B[1], f)];
-}
-
-function sceneMorph(t) {
-  const lt = t - 7.0;
-  bg(C.blue);
-  dotGrid('rgba(255,255,255,0.10)');
-  const cx = W / 2, cy = H / 2 + 10, R = 190;
-
-  // spirograph lines
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.strokeStyle = 'rgba(255,90,90,0.55)'; ctx.lineWidth = 1;
-  const sp = easeOutCubic(prog(lt, 0, 1.2));
-  ctx.beginPath();
-  const steps = Math.floor(720 * sp);
-  for (let s = 0; s <= steps; s++) {
-    const a = s / 720 * Math.PI * 2 * 3;
-    const rr = R * 1.25 + 40 * Math.sin(a * 7 / 3 + lt * 0.6);
-    const px = rr * Math.cos(a + lt * 0.2), py = rr * Math.sin(a + lt * 0.2);
-    s === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-  }
-  ctx.stroke();
-  ctx.restore();
-
-  // the morphing shape
-  const m = easeInOutCubic(prog(lt, 0.9, 2.1));
-  const pop = easeOutElastic(prog(lt, 0.05, 1.0));
-  const rot = lt * 0.35 + m * Math.PI / 3;
-  const n = 90;
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(rot);
-  ctx.scale(pop, pop);
-  ctx.fillStyle = '#FFFFFF';
-  ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const [ax, ay] = shapePoint(i, n, 'circle', R * 0.55);
-    const [bx, by] = shapePoint(i, n, 'triangle', R * 0.55);
-    const px = lerp(ax, bx, m), py = lerp(ay, by, m);
-    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-  }
-  ctx.closePath(); ctx.fill();
-  ctx.restore();
-
-  // orbiting satellites that also morph from dots to triangles
-  for (let i = 0; i < 12; i++) {
-    const a = i / 12 * Math.PI * 2 - lt * 0.5;
-    const orbit = (R + 90) * easeOutBack(prog(lt, 0.2 + i * 0.04, 0.9 + i * 0.04));
-    const px = cx + orbit * Math.cos(a), py = cy + orbit * Math.sin(a);
-    const mi = easeInOutCubic(prog(lt, 1.1 + i * 0.05, 1.8 + i * 0.05));
-    ctx.save();
-    ctx.translate(px, py); ctx.rotate(a + Math.PI / 2);
-    ctx.fillStyle = '#FFFFFF';
-    ctx.beginPath();
-    for (let k = 0; k < 30; k++) {
-      const [ax, ay] = shapePoint(k, 30, 'circle', 11);
-      const [bx, by] = shapePoint(k, 30, 'triangle', 11);
-      const qx = lerp(ax, bx, mi), qy = lerp(ay, by, mi);
-      k === 0 ? ctx.moveTo(qx, qy) : ctx.lineTo(qx, qy);
-    }
-    ctx.closePath(); ctx.fill();
-    ctx.restore();
-  }
-
-  const label = m < 0.5 ? 'CIRCLE' : 'TRIANGLE';
-  text(`MORPH  CIRCLE → TRIANGLE`, 60, H - 60, { font: `600 18px ${MONO}`, color: '#FFFFFF', alpha: 0.9 });
-  text(`shape: ${label}   k=${m.toFixed(2)}`, 60, H - 90, { font: `500 15px ${MONO}`, color: '#FFFFFF', alpha: 0.6 });
-  hud(t, '#FFFFFF', 'HELLO-YI // 03 MORPH');
-}
-
-// ---------- scene 4: easing comparison (10.4 - 13.4s) ----------
-function sceneEasing(t) {
-  const lt = t - 10.4;
-  bg(C.cream);
-  lineGrid('rgba(60,40,0,0.08)', 40);
-
-  // chart
-  const gx = 110, gy = 200, gw = 440, gh = 340;
-  const ax = easeOutCubic(prog(lt, 0, 0.5));
-  ctx.strokeStyle = C.ink; ctx.lineWidth = 2.5;
-  ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx, gy + gh * ax); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(gx, gy + gh); ctx.lineTo(gx + gw * ax, gy + gh); ctx.stroke();
-  text('position', gx - 6, gy - 14, { font: `500 18px ${MONO}`, color: C.ink, alpha: ax });
-  text('time', gx + gw, gy + gh + 30, { font: `500 18px ${MONO}`, color: C.ink, align: 'right', alpha: ax });
-
-  const draw = prog(lt, 0.4, 1.6);
-  const plot = (fn, color, dash) => {
-    ctx.save();
-    ctx.strokeStyle = color; ctx.lineWidth = 3.5; ctx.setLineDash(dash);
-    ctx.beginPath();
-    const N = 80;
-    for (let i = 0; i <= Math.floor(N * draw); i++) {
-      const k = i / N;
-      const px = gx + k * gw, py = gy + gh - fn(k) * gh;
-      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
-    }
-    ctx.stroke();
-    ctx.restore();
-  };
-  plot(k => k, C.red, [8, 8]);
-  plot(easeInOutCubic, C.blue, []);
-
-  // moving markers on the curves, looping
-  const loopK = (lt % 1.4) / 1.4;
-  if (lt > 1.6) {
-    for (const [fn, color] of [[k => k, C.red], [easeInOutCubic, C.blue]]) {
-      ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(gx + loopK * gw, gy + gh - fn(loopK) * gh, 8, 0, Math.PI * 2); ctx.fill();
-    }
-  }
-
-  // right side: two tracks
-  const tx0 = 660, tx1 = 1160;
-  const rows = [
-    { y: 300, fn: k => k, color: C.red, label: 'linear = robotic', strike: true },
-    { y: 470, fn: easeInOutCubic, color: C.blue, label: 'ease in-out ✓', strike: false },
+  const panels = [
+    { x: 80, title: '普通聊天机器人', tag: 'CHATBOT', at: 0.2 },
+    { x: 660, title: 'AI Agent', tag: 'AGENT', at: 2.4 },
   ];
-  rows.forEach((row, i) => {
-    const show = easeOutCubic(prog(lt, 0.3 + i * 0.2, 0.8 + i * 0.2));
-    ctx.save(); ctx.globalAlpha = show;
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2; ctx.setLineDash([4, 6]);
-    ctx.beginPath(); ctx.moveTo(tx0, row.y); ctx.lineTo(tx1, row.y); ctx.stroke();
+  const pw = 540, py = 170, ph = 420;
+  panels.forEach(p => {
+    const k = easeOutCubic(prog(lt, p.at, p.at + 0.5));
+    ctx.save();
+    ctx.globalAlpha = k;
+    ctx.translate(0, (1 - k) * 30);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)'; ctx.lineWidth = 2;
+    roundRect(p.x, py, pw, ph, 22); ctx.fill(); ctx.stroke();
+    text(p.title, p.x + 28, py + 48, { font: `800 26px ${SANS}`, color: C.ink });
+    text(p.tag, p.x + pw - 28, py + 46, { font: `600 14px ${MONO}`, color: C.ink, align: 'right', alpha: 0.5 });
+    ctx.fillStyle = 'rgba(0,0,0,0.08)'; ctx.fillRect(p.x + 28, py + 68, pw - 56, 2);
     ctx.restore();
-    // ghost frames show spacing: even for linear, bunched at the ends for ease
-    for (let g = 0; g <= 8; g++) {
-      const px = lerp(tx0, tx1, row.fn(g / 8));
-      ctx.save(); ctx.globalAlpha = show * 0.25;
-      ctx.strokeStyle = row.color; ctx.lineWidth = 2;
-      ctx.strokeRect(px - 18, row.y - 18, 36, 36);
+  });
+
+  const question = '明天出门要带伞吗？';
+
+  // left: the chatbot can only talk
+  const L = panels[0].x, R = L + pw - 28;
+  bubble(R, 260, question, prog(lt, 0.6, 1.0), { fill: C.ink, color: '#FFFFFF', align: 'right' });
+  if (lt > 1.0 && lt < 1.7) typingDots(L + 46, 352, lt, '#999');
+  bubble(L + 28, 330, '抱歉，我无法获取实时天气。建议你自己查一下天气预报。', prog(lt, 1.7, 2.1),
+    { fill: C.gray, color: C.ink });
+  text('只会「说」，不会「做」', L + pw / 2, py + ph - 30, {
+    font: `700 26px ${SANS}`, color: C.red, align: 'center', alpha: prog(lt, 2.1, 2.5),
+  });
+
+  // right: the agent calls tools, then answers
+  const L2 = panels[1].x, R2 = L2 + pw - 28;
+  bubble(R2, 260, question, prog(lt, 2.8, 3.2), { fill: C.ink, color: '#FFFFFF', align: 'right' });
+  const w1 = chip(L2 + 28, 352, '调用工具：查天气 ✓', prog(lt, 3.4, 3.8), C.teal);
+  chip(L2 + 28 + w1 + 12, 352, '设提醒 ✓', prog(lt, 3.9, 4.3), C.purple);
+  if (lt > 3.4 && lt < 4.5) typingDots(L2 + 46, 412, lt, '#999');
+  bubble(L2 + 28, 392, '明天有小雨，记得带伞！我已经帮你设好了早上 8 点的提醒。', prog(lt, 4.5, 4.9),
+    { fill: C.blue, color: '#FFFFFF' });
+  text('既会「说」，也会「做」', L2 + pw / 2, py + ph - 30, {
+    font: `700 26px ${SANS}`, color: C.blue, align: 'center', alpha: prog(lt, 5.0, 5.4),
+  });
+
+  hud(t, C.ink, 'AGENT 101 // 01 CHATBOT VS AGENT');
+}
+
+// ---------- scene 3: the four parts (11.5 - 19.5s) ----------
+function sceneParts(t) {
+  const lt = t - 11.5;
+  bg(C.blue);
+  dotGrid('rgba(255,255,255,0.08)');
+  heading('Agent 由什么组成？', lt, '#FFFFFF');
+
+  const cx = 640, cy = 410;
+  const nodes = [
+    { x: 250, y: 260, c: C.yellow, title: '规划', en: 'Planning', desc: '把大目标拆成小步骤' },
+    { x: 1030, y: 260, c: C.pink, title: '工具', en: 'Tools', desc: '搜索、写代码、调用 API' },
+    { x: 250, y: 560, c: C.teal, title: '记忆', en: 'Memory', desc: '记住上下文和过往经验' },
+    { x: 1030, y: 560, c: C.purple, title: '环境', en: 'Environment', desc: '执行动作，返回结果' },
+  ];
+
+  // connector lines + data pulses
+  nodes.forEach((n, i) => {
+    const at = 1.0 + i * 0.6;
+    const k = easeInOutCubic(prog(lt, at - 0.3, at));
+    if (k <= 0) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 2; ctx.setLineDash([6, 8]);
+    ctx.lineDashOffset = -lt * 30;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(lerp(cx, n.x, k), lerp(cy, n.y, k)); ctx.stroke();
+    ctx.restore();
+    if (lt > at + 0.3) {
+      for (const dir of [0, 1]) {
+        const p = ((lt - at) * 0.7 + dir * 0.5) % 1;
+        const q = dir ? 1 - p : p;
+        ctx.fillStyle = dir ? '#FFFFFF' : n.c;
+        ctx.beginPath(); ctx.arc(lerp(cx, n.x, q), lerp(cy, n.y, q), 5, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+  });
+
+  // the brain
+  const pulse = 1 + 0.03 * Math.sin(lt * 4);
+  popAt(cx, cy, prog(lt, 0.2, 0.9), () => {
+    ctx.save(); ctx.scale(pulse, pulse);
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(0, 0, 128, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#FFFFFF';
+    ctx.beginPath(); ctx.arc(0, 0, 106, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    text('大模型', 0, 4, { font: `800 40px ${SANS}`, color: C.ink, align: 'center' });
+    text('LLM · 大脑', 0, 38, { font: `600 17px ${MONO}`, color: C.ink, align: 'center', alpha: 0.65 });
+  });
+
+  // part cards
+  const cw = 270, ch = 116;
+  nodes.forEach((n, i) => {
+    const at = 1.0 + i * 0.6;
+    popAt(n.x, n.y, prog(lt, at, at + 0.5), () => {
+      ctx.fillStyle = 'rgba(0,0,0,0.22)';
+      roundRect(-cw / 2 + 7, -ch / 2 + 10, cw, ch, 18); ctx.fill();
+      ctx.fillStyle = n.c;
+      roundRect(-cw / 2, -ch / 2, cw, ch, 18); ctx.fill();
+      text(n.title, -cw / 2 + 22, -ch / 2 + 46, { font: `800 30px ${SANS}`, color: C.ink });
+      text(n.en, cw / 2 - 20, -ch / 2 + 44, { font: `600 15px ${MONO}`, color: C.ink, align: 'right', alpha: 0.6 });
+      text(n.desc, -cw / 2 + 22, -ch / 2 + 88, { font: `500 19px ${SANS}`, color: C.ink, alpha: 0.85 });
+    });
+  });
+
+  const f = easeOutCubic(prog(lt, 4.0, 4.6));
+  text('大模型负责「想」，其余部分让它能真正「做」', W / 2, 680 + (1 - f) * 12, {
+    font: `600 22px ${SANS}`, color: '#FFFFFF', align: 'center', alpha: f,
+  });
+  hud(t, '#FFFFFF', 'AGENT 101 // 02 COMPONENTS');
+}
+
+// ---------- scene 4: the agent loop (19.5 - 31.5s) ----------
+const LOOP = {
+  start: 1.6, lap: 2.7, laps: 3,
+  stations: [
+    { name: '思考', en: 'THINK', c: C.blue, desc: '看目标和已有信息，决定下一步做什么' },
+    { name: '行动', en: 'ACT', c: C.orange, desc: '调用工具：搜索、跑代码、发请求……' },
+    { name: '观察', en: 'OBSERVE', c: C.teal, desc: '读取工具返回的结果，判断任务是否完成' },
+  ],
+};
+
+function sceneLoop(t) {
+  const lt = t - 19.5;
+  bg(C.cream);
+  lineGrid('rgba(60,40,0,0.07)', 40);
+  heading('核心：Agent 循环', lt, C.ink);
+
+  const cx = 470, cy = 420, R = 180;
+  const angOf = i => -Math.PI / 2 + i * (Math.PI * 2 / 3);
+
+  // ring, drawn on progressively
+  const ring = easeInOutCubic(prog(lt, 0.2, 1.2));
+  ctx.save();
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 3; ctx.setLineDash([2, 10]); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ring); ctx.stroke();
+  ctx.restore();
+  // clockwise arrowheads halfway between stations
+  for (let i = 0; i < 3; i++) {
+    const a = angOf(i) + Math.PI / 3;
+    const k = prog(lt, 0.8 + i * 0.15, 1.1 + i * 0.15);
+    if (k <= 0) continue;
+    const px = cx + R * Math.cos(a), py = cy + R * Math.sin(a);
+    ctx.save();
+    ctx.translate(px, py); ctx.rotate(a + Math.PI / 2); ctx.globalAlpha = k;
+    ctx.fillStyle = C.ink;
+    ctx.beginPath(); ctx.moveTo(10, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // where the traveller is
+  const loopEnd = LOOP.start + LOOP.lap * LOOP.laps;
+  const running = lt >= LOOP.start && lt < loopEnd;
+  const done = lt >= loopEnd;
+  const phase = clamp((lt - LOOP.start) / LOOP.lap, 0, LOOP.laps); // laps travelled
+  const lap = Math.min(LOOP.laps, Math.floor(phase) + 1);
+  const seg = Math.floor((phase % 1) * 3);                          // station just passed
+  const sinceSeg = ((phase % 1) * 3 - seg) * LOOP.lap / 3;          // seconds at this station
+
+  // goal coming in
+  const g = easeOutCubic(prog(lt, 0.9, 1.4));
+  ctx.save(); ctx.globalAlpha = g;
+  ctx.fillStyle = C.ink; roundRect(60, 190, 170, 52, 26); ctx.fill();
+  text('目标 / 任务', 145, 224, { font: `700 21px ${SANS}`, color: '#FFFFFF', align: 'center' });
+  ctx.restore();
+  arrow(236, 216, cx - 72, cy - R, C.ink, easeOutCubic(prog(lt, 1.1, 1.6)));
+
+  // stations
+  LOOP.stations.forEach((s, i) => {
+    const a = angOf(i);
+    const sx = cx + R * Math.cos(a), sy = cy + R * Math.sin(a);
+    const active = running && seg === i;
+    const glow = active ? easeOutCubic(clamp(sinceSeg / 0.3)) : 0;
+    popAt(sx, sy, prog(lt, 0.4 + i * 0.2, 0.9 + i * 0.2), () => {
+      if (glow > 0) {
+        ctx.fillStyle = s.c; ctx.globalAlpha *= 0.25 * glow;
+        ctx.beginPath(); ctx.arc(0, 0, 62 + 18 * glow, 0, Math.PI * 2); ctx.fill();
+        ctx.globalAlpha /= 0.25 * glow;
+      }
+      const sc = 1 + 0.1 * glow;
+      ctx.scale(sc, sc);
+      ctx.fillStyle = s.c;
+      ctx.beginPath(); ctx.arc(0, 0, 60, 0, Math.PI * 2); ctx.fill();
+      text(s.name, 0, 6, { font: `800 30px ${SANS}`, color: '#FFFFFF', align: 'center' });
+      text(s.en, 0, 32, { font: `700 12px ${MONO}`, color: '#FFFFFF', align: 'center', alpha: 0.8 });
+    });
+  });
+
+  // the traveller with a short trail
+  if (running) {
+    for (let j = 10; j >= 0; j--) {
+      const p = Math.max(0, phase - j * 0.012);
+      const a = -Math.PI / 2 + p * Math.PI * 2;
+      ctx.save();
+      ctx.globalAlpha = j === 0 ? 1 : 0.35 * (1 - j / 11);
+      ctx.fillStyle = C.ink;
+      ctx.beginPath(); ctx.arc(cx + R * Math.cos(a), cy + R * Math.sin(a), j === 0 ? 11 : 8, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     }
-    const bxp = lt > 1.6 ? lerp(tx0, tx1, row.fn(loopK)) : tx0;
-    ctx.save(); ctx.globalAlpha = show;
-    ctx.fillStyle = row.color; ctx.fillRect(bxp - 18, row.y - 18, 36, 36);
-    ctx.restore();
+  }
 
-    const lk = prog(lt, 0.7 + i * 0.3, 1.1 + i * 0.3);
-    text(row.label, tx0, row.y - 44, { font: `italic 600 28px ${SERIF}`, color: row.color, alpha: lk });
-    if (row.strike) {
-      const sk = easeOutCubic(prog(lt, 1.3, 1.6));
-      ctx.strokeStyle = C.red; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(tx0 - 4, row.y - 53); ctx.lineTo(tx0 - 4 + 230 * sk, row.y - 53); ctx.stroke();
-    }
+  text('不断循环，直到目标完成', cx, 680, {
+    font: `600 22px ${SANS}`, color: C.ink, align: 'center', alpha: prog(lt, 1.8, 2.3) * 0.8,
   });
 
-  text('Easing', 60, 130, { font: `800 44px ${SANS}`, color: C.ink, alpha: prog(lt, 0.1, 0.5) });
-  hud(t, C.ink, 'HELLO-YI // 04 TIMING');
+  // right panel: what is happening now
+  const px = 780;
+  if (!done) {
+    const show = prog(lt, LOOP.start, LOOP.start + 0.3);
+    text(`第 ${lap} 轮`, px, 260, { font: `800 60px ${SANS}`, color: C.ink, alpha: show });
+    const s = LOOP.stations[seg];
+    const k = easeOutCubic(clamp(sinceSeg / 0.35)) * show;
+    text(s.name, px + (1 - k) * 20, 350, { font: `800 44px ${SANS}`, color: s.c, alpha: k });
+    const { lines } = wrap(s.desc, 420, `500 25px ${SANS}`);
+    lines.forEach((l, i) => text(l, px + (1 - k) * 20, 402 + i * 38, { font: `500 25px ${SANS}`, color: C.ink, alpha: k * 0.85 }));
+    // lap pips
+    for (let i = 0; i < LOOP.laps; i++) {
+      ctx.save(); ctx.globalAlpha = show;
+      ctx.fillStyle = i < lap ? C.ink : 'rgba(0,0,0,0.15)';
+      roundRect(px + i * 46, 500, 36, 8, 4); ctx.fill();
+      ctx.restore();
+    }
+  } else {
+    popAt(px + 170, 330, prog(lt, loopEnd, loopEnd + 0.5), () => {
+      ctx.fillStyle = C.teal;
+      roundRect(-170, -60, 340, 120, 24); ctx.fill();
+      text('任务完成 ✓', 0, 16, { font: `800 44px ${SANS}`, color: '#FFFFFF', align: 'center' });
+    });
+    const f = prog(lt, loopEnd + 0.4, loopEnd + 0.9);
+    text('达成目标就停下，', px, 450, { font: `500 25px ${SANS}`, color: C.ink, alpha: f * 0.85 });
+    text('把结果交还给用户', px, 488, { font: `500 25px ${SANS}`, color: C.ink, alpha: f * 0.85 });
+  }
+  hud(t, C.ink, 'AGENT 101 // 03 THE LOOP');
 }
 
-// ---------- scene 5: cards + outro (13.4 - 15.5s) ----------
-function sceneOutro(t) {
-  const lt = t - 13.4;
+// ---------- scene 5: worked example (31.5 - 42s) ----------
+const TRACE = [
+  { kind: '思考', text: '要先知道明天北京的天气' },
+  { kind: '行动', text: 'weather(city="北京", date="明天")' },
+  { kind: '观察', text: '小雨，14–19°C，降水概率 80%' },
+  { kind: '思考', text: '会下雨 → 需要发提醒邮件' },
+  { kind: '行动', text: 'send_email(to="我", subject="明天记得带伞")' },
+  { kind: '观察', text: '邮件发送成功' },
+  { kind: '完成', text: '明天北京有小雨，已发邮件提醒你带伞 ✓' },
+];
+const KIND_COLOR = { '思考': C.sky, '行动': C.orange, '观察': C.teal, '完成': C.yellow };
+
+function sceneExample(t) {
+  const lt = t - 31.5;
+  bg(C.night);
+  dotGrid('rgba(255,255,255,0.05)');
+  heading('举个例子', lt, '#FFFFFF');
+
+  const k = easeOutCubic(prog(lt, 0.3, 0.8));
+  ctx.save();
+  ctx.globalAlpha = k; ctx.translate(0, (1 - k) * 20);
+  ctx.fillStyle = '#1F2128'; roundRect(60, 165, 1160, 72, 14); ctx.fill();
+  ctx.fillStyle = C.orange; roundRect(60, 165, 8, 72, 4); ctx.fill();
+  text('任务', 92, 210, { font: `700 22px ${SANS}`, color: C.orange });
+  text('查一下明天北京的天气，如果下雨就发邮件提醒我带伞', 152, 210, { font: `500 24px ${SANS}`, color: '#FFFFFF' });
+  ctx.restore();
+
+  const font = `500 22px ${MONO}`;
+  let cursor = null;
+  TRACE.forEach((row, i) => {
+    const at = 1.2 + i * 1.2;
+    if (lt < at) return;
+    const y = 300 + i * 56;
+    const a = easeOutCubic(prog(lt, at, at + 0.25));
+    const color = KIND_COLOR[row.kind];
+    ctx.save();
+    ctx.globalAlpha = a; ctx.translate((1 - a) * -16, 0);
+    ctx.fillStyle = color; roundRect(60, y - 25, 82, 36, 8); ctx.fill();
+    text(row.kind, 101, y + 1, { font: `700 19px ${SANS}`, color: row.kind === '完成' ? C.ink : '#FFFFFF', align: 'center' });
+    ctx.restore();
+    // typewriter
+    const chars = [...row.text];
+    const n = Math.floor(chars.length * prog(lt, at + 0.15, at + 0.85));
+    const shown = chars.slice(0, n).join('');
+    const tcolor = row.kind === '行动' ? '#FFD9CF' : row.kind === '完成' ? C.yellow : '#E8E8EA';
+    text(shown, 164, y + 1, { font, color: tcolor });
+    ctx.save(); ctx.font = font; const w = ctx.measureText(shown).width; ctx.restore();
+    cursor = { x: 164 + w + 4, y };
+  });
+  if (cursor && Math.floor(lt * 2.5) % 2 === 0) {
+    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(cursor.x, cursor.y - 20, 11, 24);
+  }
+
+  // legend on the right
+  const lg = prog(lt, 1.0, 1.5);
+  ['思考', '行动', '观察'].forEach((kname, i) => {
+    ctx.save(); ctx.globalAlpha = lg * 0.85;
+    ctx.fillStyle = KIND_COLOR[kname];
+    ctx.beginPath(); ctx.arc(1040, 296 + i * 34, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    text(['大模型推理', '调用工具', '工具返回'][i], 1058, 303 + i * 34, { font: `500 18px ${SANS}`, color: '#FFFFFF', alpha: lg * 0.7 });
+  });
+
+  hud(t, '#FFFFFF', 'AGENT 101 // 04 EXAMPLE');
+}
+
+// ---------- scene 6: summary (42 - 48s) ----------
+function sceneSummary(t) {
+  const lt = t - 42;
   bg(C.blue);
   dotGrid('rgba(255,255,255,0.08)');
 
-  const cards = [
-    { c: C.yellow, n: '01', title: 'Code', sub: 'draw(t)' },
-    { c: C.pink, n: '02', title: 'Render', sub: 'Chromium' },
-    { c: C.teal, n: '03', title: 'Encode', sub: 'ffmpeg' },
-    { c: C.purple, n: '04', title: 'Ship', sub: '.mp4' },
+  const items = [
+    { s: 'Agent', fill: '#FFFFFF', color: C.ink },
+    { op: '=' },
+    { s: '大模型', fill: C.yellow, color: C.ink },
+    { op: '+' },
+    { s: '工具', fill: C.pink, color: C.ink },
+    { op: '+' },
+    { s: '记忆', fill: C.teal, color: C.ink },
+    { op: '+' },
+    { s: '循环', fill: C.purple, color: '#FFFFFF' },
   ];
-  const cw = 200, ch = 280, gap = 28;
-  const startX = (W - (cw * 4 + gap * 3)) / 2;
-  cards.forEach((card, i) => {
-    const k = easeOutBack(prog(lt, 0.05 + i * 0.1, 0.6 + i * 0.1));
-    const x = startX + i * (cw + gap);
-    const y = 150 + (1 - k) * 420;
-    ctx.save();
-    ctx.translate(x + cw / 2, y + ch / 2);
-    ctx.rotate((1 - k) * (i % 2 ? 0.3 : -0.3));
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    roundRect(-cw / 2 + 8, -ch / 2 + 12, cw, ch, 18); ctx.fill();
-    ctx.fillStyle = card.c;
-    roundRect(-cw / 2, -ch / 2, cw, ch, 18); ctx.fill();
-    text(`// ${card.n}`, -cw / 2 + 18, -ch / 2 + 34, { font: `600 15px ${MONO}`, color: C.ink, alpha: 0.7 });
-    text(card.title, -cw / 2 + 18, ch / 2 - 56, { font: `800 38px ${SANS}`, color: C.ink });
-    text(card.sub, -cw / 2 + 18, ch / 2 - 24, { font: `500 17px ${MONO}`, color: C.ink, alpha: 0.75 });
-    ctx.restore();
+  const font = `800 40px ${SANS}`, opFont = `800 48px ${SANS}`;
+  ctx.save();
+  const sizes = items.map(it => {
+    ctx.font = it.op ? opFont : font;
+    return it.op ? ctx.measureText(it.op).width + 36 : ctx.measureText(it.s).width + 56;
+  });
+  ctx.restore();
+  const total = sizes.reduce((a, b) => a + b, 0);
+  let x = (W - total) / 2;
+  const y = 300;
+  items.forEach((it, i) => {
+    const w = sizes[i];
+    const k = prog(lt, 0.2 + i * 0.18, 0.7 + i * 0.18);
+    popAt(x + w / 2, y, k, () => {
+      if (it.op) {
+        text(it.op, 0, 16, { font: opFont, color: '#FFFFFF', align: 'center' });
+      } else {
+        ctx.fillStyle = 'rgba(0,0,0,0.22)'; roundRect(-w / 2 + 5, -40 + 7, w, 80, 18); ctx.fill();
+        ctx.fillStyle = it.fill; roundRect(-w / 2, -40, w, 80, 18); ctx.fill();
+        text(it.s, 0, 14, { font, color: it.color, align: 'center' });
+      }
+    });
+    x += w;
   });
 
-  const f = easeOutCubic(prog(lt, 0.8, 1.3));
-  text('Made with code. Rendered frame by frame.', W / 2, 560 + (1 - f) * 20, {
-    font: `700 34px ${SANS}`, color: '#FFFFFF', align: 'center', alpha: f,
+  const f = easeOutCubic(prog(lt, 2.2, 2.8));
+  text('会思考，也会动手。', W / 2, 470 + (1 - f) * 24, {
+    font: `800 64px ${SANS}`, color: '#FFFFFF', align: 'center', alpha: f,
   });
-  text('github.com/MisterYI/hello-yi', W / 2, 600, {
-    font: `500 17px ${MONO}`, color: '#FFFFFF', align: 'center', alpha: prog(lt, 1.1, 1.5) * 0.7,
+  text('AGENT 101 · 用代码逐帧渲染', W / 2, 530, {
+    font: `600 18px ${MONO}`, color: '#FFFFFF', align: 'center', alpha: prog(lt, 2.8, 3.3) * 0.7,
   });
-  hud(t, '#FFFFFF', 'HELLO-YI // 05 PIPELINE');
+  hud(t, '#FFFFFF', 'AGENT 101 // 05 SUMMARY');
 
-  // fade to black at the very end
-  const out = prog(t, DURATION - 0.35, DURATION);
+  const out = prog(t, DURATION - 0.5, DURATION);
   if (out > 0) { ctx.fillStyle = `rgba(0,0,0,${out})`; ctx.fillRect(0, 0, W, H); }
 }
 
@@ -459,11 +607,12 @@ function slideWipe(t, a, b, color, dir) {
 }
 
 const SCENES = [
-  [0.0, 3.4, sceneTitle],
-  [3.4, 7.0, sceneBounce],
-  [7.0, 10.4, sceneMorph],
-  [10.4, 13.4, sceneEasing],
-  [13.4, DURATION + 1, sceneOutro],
+  [0, 5, sceneTitle],
+  [5, 11.5, sceneVersus],
+  [11.5, 19.5, sceneParts],
+  [19.5, 31.5, sceneLoop],
+  [31.5, 42, sceneExample],
+  [42, DURATION + 1, sceneSummary],
 ];
 
 function renderFrame(t) {
@@ -472,18 +621,19 @@ function renderFrame(t) {
   const scene = SCENES.find(([a, b]) => t >= a && t < b) || SCENES[SCENES.length - 1];
   scene[2](t);
   // transitions cover the cut at each scene boundary
-  irisWipe(t, 3.0, 3.4, C.paper);
-  slideWipe(t, 6.6, 7.0, C.blue, 'left');
-  slideWipe(t, 10.0, 10.4, C.cream, 'down');
-  irisWipe(t, 13.0, 13.4, C.blue);
+  irisWipe(t, 4.6, 5.0, C.paper);
+  slideWipe(t, 11.1, 11.5, C.blue, 'left');
+  slideWipe(t, 19.1, 19.5, C.cream, 'down');
+  irisWipe(t, 31.1, 31.5, C.night);
+  slideWipe(t, 41.6, 42, C.blue, 'left');
 }
 
 window.FPS = FPS;
 window.DURATION = DURATION;
 window.renderFrame = renderFrame;
 window.ready = (async () => {
-  const fonts = [`900 210px ${DISPLAY}`, `800 44px ${SANS}`, `italic 46px ${SERIF}`, `600 18px ${MONO}`];
-  await Promise.all(fonts.map(f => document.fonts.load(f).catch(() => {})));
+  const fonts = [`900 190px ${DISPLAY}`, `800 44px ${SANS}`, `600 18px ${MONO}`];
+  await Promise.all(fonts.map(f => document.fonts.load(f, 'Agent 智能体').catch(() => {})));
   renderFrame(0);
   return true;
 })();

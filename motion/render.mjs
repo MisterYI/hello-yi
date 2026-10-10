@@ -49,7 +49,7 @@ if (stillAt !== null) {
   writeFileSync(file, await grab(stillAt));
   console.log('wrote', file);
 } else {
-  const mp4 = join(outDir, 'hello-yi.mp4');
+  const mp4 = join(outDir, 'agent-explainer.mp4');
   const encoding = run('ffmpeg', [
     '-y', '-loglevel', 'error',
     '-f', 'image2pipe', '-framerate', String(fps), '-i', '-',
@@ -67,12 +67,12 @@ if (stillAt !== null) {
   await encoding;
   console.log(`\rwrote ${mp4} (${frames} frames)`);
 
-  // Contact sheet: 2 stills per second tiled into one image, for reviewing
+  // Contact sheet: one still per second tiled into one image, for reviewing
   // the whole video at a glance.
-  const cols = 6, rows = Math.ceil(duration * 2 / cols);
+  const cols = 8, rows = Math.ceil(duration / cols);
   await run('ffmpeg', [
     '-y', '-loglevel', 'error', '-i', mp4,
-    '-vf', `fps=2,scale=320:-1,tile=${cols}x${rows}:padding=4:color=white`,
+    '-vf', `fps=1,scale=320:-1,tile=${cols}x${rows}:padding=4:color=white`,
     '-frames:v', '1', join(outDir, 'contact-sheet.png'),
   ], { stdio: 'inherit' });
   console.log('wrote', join(outDir, 'contact-sheet.png'));
