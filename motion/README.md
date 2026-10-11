@@ -1,12 +1,12 @@
 # motion
 
-用代码做的视频。画面、文字、音乐全部由程序生成，没有使用任何外部素材。
+用代码做的视频。画面和文字全部由程序生成；沙画的配乐用了真实钢琴采样（见下方致谢），其余音乐由程序合成。
 
 | 作品 | 源文件 | 成品 |
 |---|---|---|
 | 《冬冬和我们》像素风 MV（64 秒，带配乐） | `cat-mv.html` + `cat-mv-music.mjs` | `out/cat-mv.mp4` |
 | AI Agent 原理科普（48 秒） | `agent-explainer.html` | `out/agent-explainer.mp4` |
-| 沙画《冬冬》（63 秒，真实沙粒模拟） | `sand-film.html`（引擎测试：`sand-real.html`） | `out/sand-dongdong.mp4` |
+| 沙画《冬冬》（63 秒，真实沙粒模拟，钢琴配乐） | `sand-film.html` + `sand-music.py`（引擎测试：`sand-real.html`） | `out/sand-dongdong.mp4` |
 
 ## 《冬冬和我们》
 
@@ -39,6 +39,18 @@
 - **文字**：「冬冬」逐笔书写；其他字从字形骨架提取笔画，由手指写进沙里。
 - **六幕**：撒沙写「冬冬」→ 夜里猫舍的车送来冬冬 → 双手捧着发光的冬冬 → 沙发、台灯、扑毛线 → 窗外四季、窗台上的冬冬长大 → 屋顶望月，擦去一切只留月亮，写下「冬冬」「谢谢你」。
 - **渲染**：模拟有状态，按时间顺序推进；`--from/--to` 分段并行渲染时，每段会先从头重放模拟到起点。
+- **配乐**：`sand-music.py` 写的一首 3/4 拍、72 BPM 的 F 大调钢琴摇篮曲，每 4 小节（10 秒）对应一幕。
+  用真实三角钢琴的录音采样演奏，不是合成音色；和弦逐个滚奏，时值与力度带细微的人为浮动，乐句之间有呼吸，
+  每小节换一次延音踏板（带踏板的机械声），再加一个小房间的混响。
+  ```bash
+  python3 sand-music.py <Salamander 的 Samples 目录>   # 输出 out/sand-dongdong.wav
+  ```
+  需要 numpy 和 ffmpeg。采样库需单独下载：https://github.com/sfzinstruments/SalamanderGrandPiano
+
+## 致谢
+
+- 钢琴采样：Salamander Grand Piano V3，作者 Alexander Holm，
+  [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)（https://github.com/sfzinstruments/SalamanderGrandPiano）。
 
 ## 原理
 
