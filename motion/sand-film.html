@@ -1,0 +1,922 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>冬冬 · 沙画</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { width: min(100vw, 177.78vh); height: auto; display: block; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+// 冬冬 — a sand-art film: real sand on a light box, a grain simulation, no shapes drawn.
+//
+// What real sand art looks like (studied from frames of Kseniya Simonova's
+// and other artists' performances):
+//   - high contrast: glass wiped clean glows almost cream-white, thin sand is
+//     golden amber, thick sand is a deep brown-black, with smoky gradients
+//     between them; grain shows subtly, mostly at edges and in thin sand
+//   - big forms are spread with the palm and have feathered edges; detail is
+//     cut with a fingertip (clean bright lines with a ridge either side), a
+//     fingernail (hair-thin lines), and rows of pressed "pearl" dots
+//
+// The glass is a 1280x720 grid; each cell holds a whole number of grains,
+// about LAYER grains for one even layer, so a thin layer reads as a smooth
+// translucent tone with fine grain rather than speckle. Every mark is made by
+// a tool moving grains over time: spread (palm laying a layer), fill (a fist
+// trickling sand into a shape), finger, fingernail, palm edge (擦, bulldozing
+// a bank and leaving streaks), poke (pearls). Piles slump past the angle of
+// repose. The simulation is stateful and deterministic: frames are produced in
+// order, and seeking backwards replays from the start.
+
+const W = 1280, H = 720, N = W * H, FPS = 30;
+const LAYER = 24;          // grains in one even layer of sand
+const ABSORB = 0.085;      // light lost per grain: T = exp(-ABSORB * grains)
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const img = ctx.createImageData(W, H);
+const frame = new OffscreenCanvas(W, H), fctx = frame.getContext('2d');
+const bloom = new OffscreenCanvas(W / 4, H / 4), bctx = bloom.getContext('2d');
+
+// ---------- helpers ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+// A confident hand stroke: quick to start, slowing into the end.
+const stroke = k => 1 - Math.pow(1 - k, 2.2);
+const glide = k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+function mulberry(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const SEED = 20261011;
+let R = mulberry(SEED);
+const hash = n => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+const gauss = () => { let u = 0; while (u === 0) u = R(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * R()); };
+const bez = (p0, c, p1, t) => [(1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0], (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1]];
+// A hand never draws a mathematically perfect line: add a slow, small wobble.
+function humanize(pts, amp, seed) {
+  if (!amp) return pts;
+  return pts.map(([x, y], i) => {
+    const a = pts[Math.min(i + 1, pts.length - 1)], b = pts[Math.max(i - 1, 0)];
+    let nx = -(a[1] - b[1]), ny = a[0] - b[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    const w = amp * (Math.sin(i * 0.11 + seed) * 0.6 + Math.sin(i * 0.037 + seed * 2.3) * 0.4);
+    return [x + nx * w, y + ny * w];
+  });
+}
+function path(segs, n = 30, wob = 0, seed = 0) {
+  const pts = [];
+  segs.forEach(([p0, c, p1], i) => { for (let j = i ? 1 : 0; j <= n; j++) pts.push(bez(p0, c, p1, j / n)); });
+  return polyPath(humanize(pts, wob, seed));
+}
+function polyPath(pts) {
+  const len = [0];
+  for (let i = 1; i < pts.length; i++) len.push(len[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const total = len[len.length - 1] || 1;
+  return { pts, total, at(u) {
+    const d = clamp(u) * total;
+    let lo = 0, hi = len.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (len[m] <= d) lo = m; else hi = m; }
+    const k = (d - len[lo]) / ((len[hi] - len[lo]) || 1);
+    return [lerp(pts[lo][0], pts[hi][0], k), lerp(pts[lo][1], pts[hi][1], k)];
+  } };
+}
+const ring = (cx, cy, r, a0, turns, n, wob = 0, seed = 0) => polyPath(humanize(
+  Array.from({ length: n + 1 }, (_, i) => { const a = a0 + i / n * Math.PI * 2 * turns; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }), wob, seed));
+
+// Smooth noise in [0, 1] over the glass (blurred random), for clouds of sand.
+function cloud(seed, blur) {
+  const c = new OffscreenCanvas(W / 4, H / 4), x = c.getContext('2d', { willReadFrequently: true });
+  const id = x.createImageData(W / 4, H / 4), r = mulberry(seed);
+  for (let i = 0; i < id.data.length; i += 4) { id.data[i] = id.data[i + 1] = id.data[i + 2] = r() * 255; id.data[i + 3] = 255; }
+  x.putImageData(id, 0, 0);
+  const c2 = new OffscreenCanvas(W, H), x2 = c2.getContext('2d', { willReadFrequently: true });
+  x2.filter = `blur(${blur}px)`; x2.drawImage(c, -20, -20, W + 40, H + 40);
+  const d = x2.getImageData(0, 0, W, H).data, out = new Float32Array(N);
+  let lo = 1e9, hi = -1e9;
+  for (let i = 0; i < N; i++) { out[i] = d[i * 4]; lo = Math.min(lo, out[i]); hi = Math.max(hi, out[i]); }
+  for (let i = 0; i < N; i++) out[i] = (out[i] - lo) / (hi - lo || 1);
+  return out;
+}
+// A soft (feathered) mask from a drawn shape, values 0..1.
+function softMask(drawPath, feather = 2) {
+  const c = new OffscreenCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+  x.filter = `blur(${feather}px)`; x.fillStyle = '#fff'; x.strokeStyle = '#fff'; drawPath(x);
+  const d = x.getImageData(0, 0, W, H).data, m = new Float32Array(N);
+  for (let i = 0; i < N; i++) m[i] = d[i * 4 + 3] / 255;
+  return m;
+}
+
+// ---------- the sand ----------
+const G = new Uint16Array(N);
+let BOX = null;
+function touch(x0, y0, x1, y1) {
+  x0 = Math.max(1, Math.floor(x0)); y0 = Math.max(1, Math.floor(y0)); x1 = Math.min(W - 2, Math.ceil(x1)); y1 = Math.min(H - 2, Math.ceil(y1));
+  BOX = BOX ? [Math.min(BOX[0], x0), Math.min(BOX[1], y0), Math.max(BOX[2], x1), Math.max(BOX[3], y1)] : [x0, y0, x1, y1];
+}
+function drop1(x, y, k) {
+  x = x | 0; y = y | 0;
+  if (x < 0 || y < 0 || x >= W || y >= H) return;
+  const i = y * W + x; G[i] = Math.min(65000, G[i] + k);
+}
+// Sand never lands on a single point: spread k grains over a few nearby cells.
+function drop(x, y, k = 1) {
+  if (k <= 3) { drop1(x, y, k); return; }
+  const parts = Math.min(8, (k / 3) | 0);
+  let left = k;
+  for (let j = 0; j < parts; j++) {
+    const c = j === parts - 1 ? left : Math.floor(k / parts);
+    left -= c;
+    drop1(x + (R() - 0.5) * 3.2, y + (R() - 0.5) * 3.2, c);
+  }
+}
+// Trickle `count` grains around (x, y) with spread s, in small clumps; a soft
+// mask makes landing likelier where it is higher.
+function trickle(x, y, count, s, mask = null) {
+  let n = count;
+  while (n > 0) {
+    const k = Math.min(n, 1 + ((R() * 4) | 0));
+    n -= k;
+    let gx = x + gauss() * s, gy = y + gauss() * s;
+    if (mask) {
+      let ok = false;
+      for (let tries = 0; tries < 8 && !ok; tries++) {
+        if (tries) { gx = x + gauss() * s; gy = y + gauss() * s; }
+        const xi = gx | 0, yi = gy | 0;
+        ok = xi >= 0 && yi >= 0 && xi < W && yi < H && R() < mask[yi * W + xi];
+      }
+      if (!ok) continue;
+    }
+    drop(gx, gy, k);
+  }
+  touch(x - 3 * s, y - 3 * s, x + 3 * s, y + 3 * s);
+}
+// A fingertip of radius r moving along (vx, vy): grains under it go to its rim,
+// mostly to the sides and a little ahead, piling ridges along the line.
+function push(cx, cy, r, vx, vy, strength = 0.95, fwd = 0.6, mask = null) {
+  const vl = Math.hypot(vx, vy), ux = vl ? vx / vl : 0, uy = vl ? vy / vl : 0;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+  const r2 = r * r;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x + 0.5 - cx, dy = y + 0.5 - cy, d2 = dx * dx + dy * dy;
+    if (d2 > r2) continue;
+    const i = y * W + x, n = G[i];
+    if (!n || (mask && mask[i] < 0.5)) continue;
+    const d = Math.sqrt(d2);
+    const f = strength * (d < r * 0.6 ? 1 : 1 - (d - r * 0.6) / (r * 0.4) * 0.6);
+    let m = Math.floor(n * f + R());
+    if (m > n) m = n;
+    if (!m) continue;
+    G[i] = n - m;
+    let ax = d ? dx / d : R() - 0.5, ay = d ? dy / d : R() - 0.5;
+    if (vl) { ax += ux * fwd; ay += uy * fwd; }
+    const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al;
+    const chunks = Math.min(m, 4);
+    let left = m;
+    for (let c = 0; c < chunks; c++) {
+      const k = c === chunks - 1 ? left : Math.floor(m / chunks);
+      left -= k;
+      const dist = r + 0.5 + R() * Math.max(2, r * 0.35);
+      drop(cx + ax * dist + (R() - 0.5) * 2, cy + ay * dist + (R() - 0.5) * 2, k);
+    }
+  }
+  touch(cx - r * 1.5 - 4, cy - r * 1.5 - 4, cx + r * 1.5 + 4, cy + r * 1.5 + 4);
+}
+// The side of the palm: a straight edge (half-length L) across the motion,
+// carrying sand to a bank in front of it; some slips under in lanes (streaks).
+const LANE = (() => { const r = mulberry(77), a = new Float32Array(4096); let v = 0.5; for (let i = 0; i < 4096; i++) { v = clamp(v + (r() - 0.5) * 0.18); a[i] = v; } return a; })();
+// Lanes vary smoothly across the edge (interpolated, so no steps between cells).
+const laneAt = v => { const f = Math.floor(v), k = v - f, i = ((f % 4096) + 4096) % 4096; return lerp(LANE[i], LANE[(i + 1) % 4096], k); };
+function palmEdge(cx, cy, L, vx, vy, strength = 0.94, streak = 0.35) {
+  const vl = Math.hypot(vx, vy);
+  if (!vl) return;
+  const ux = vx / vl, uy = vy / vl, px = -uy, py = ux, w = Math.max(3, vl * 1.4), ext = L + w + 4;
+  const x0 = Math.max(0, Math.floor(cx - ext)), x1 = Math.min(W - 1, Math.ceil(cx + ext));
+  const y0 = Math.max(0, Math.floor(cy - ext)), y1 = Math.min(H - 1, Math.ceil(cy + ext));
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x + 0.5 - cx, dy = y + 0.5 - cy, a = dx * ux + dy * uy, b = dx * px + dy * py;
+    if (a < -w || a > 1.5 || Math.abs(b) > L) continue;
+    const i = y * W + x, n = G[i];
+    if (!n) continue;
+    const soft = Math.abs(b) > L - 24 ? (L - Math.abs(b)) / 24 : 1;
+    const lane = laneAt(x * px + y * py);
+    let m = Math.floor(n * strength * soft * (1 - streak * lane * lane) + R());
+    if (m > n) m = n;
+    if (!m) continue;
+    G[i] = n - m;
+    const ahead = 2 + R() * 4, side = Math.abs(b) > L - 24 ? Math.sign(b) * R() * 8 : (R() - 0.5) * 2;
+    drop(cx + ux * ahead + px * (b + side), cy + uy * ahead + py * (b + side), m);
+  }
+  touch(cx - ext - 8, cy - ext - 8, cx + ext + 8, cy + ext + 8);
+}
+// 撒 a fist flinging sand as it swings: grains land in a fan stretched along
+// the swing, in little clumps.
+function cast(cx, cy, vx, vy, count, along, across) {
+  const vl = Math.hypot(vx, vy) || 1, ux = vx / vl, uy = vy / vl, px = -uy, py = ux;
+  let n = count;
+  while (n > 0) {
+    const k = Math.min(n, 1 + ((R() * 5) | 0));
+    n -= k;
+    const a = gauss() * along + along * 0.4, b = gauss() * across * (1 + Math.abs(a) / along * 0.5);
+    drop1(cx + ux * a + px * b, cy + uy * a + py * b, k);
+  }
+  touch(cx - along * 3, cy - along * 3, cx + along * 3, cy + along * 3);
+}
+// 抹 the flat palm smoothing the layer: grains flow from fuller cells to
+// emptier neighbours under the hand, evening the sand out.
+function smoothUnder(cx, cy, r, amount = 0.5) {
+  const x0 = Math.max(3, Math.floor(cx - r)), x1 = Math.min(W - 4, Math.ceil(cx + r));
+  const y0 = Math.max(3, Math.floor(cy - r)), y1 = Math.min(H - 4, Math.ceil(cy + r));
+  const r2 = r * r;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x - cx, dy = y - cy;
+    if (dx * dx + dy * dy > r2) continue;
+    const i = y * W + x, j = i + (((R() * 7) | 0) - 3) + (((R() * 7) | 0) - 3) * W;
+    const diff = G[i] - G[j];
+    if (diff > 1) { const m = Math.floor(diff * amount * 0.5 + R()); G[i] -= m; G[j] += m; }
+  }
+}
+// 擦 the heel of the palm rubbing around a centre: sand under it is thinned and
+// carried outwards, leaving a soft glowing halo.
+function rubAround(cx, cy, r, ox, oy, amount = 0.35) {
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+    if (d2 > r * r) continue;
+    const i = y * W + x, n = G[i];
+    if (!n) continue;
+    const m = Math.floor(n * amount * (1 - d2 / (r * r)) + R());
+    if (!m) continue;
+    G[i] = n - m;
+    let ax = x - ox, ay = y - oy; const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al;
+    const d = r * (0.6 + R() * 1.1); drop(x + ax * d, y + ay * d, m);
+  }
+  touch(cx - r * 2, cy - r * 2, cx + r * 2, cy + r * 2);
+}
+// For clearing a shape: for every cell inside, the direction and distance to the
+// nearest edge (a chamfer distance transform), so a fingertip can push sand out.
+function edgeField(mask) {
+  const D = new Float32Array(N).fill(0);
+  for (let i = 0; i < N; i++) D[i] = mask[i] > 0.5 ? 1e6 : 0;
+  const a = 1, b = 1.414;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x; if (!D[i]) continue;
+    D[i] = Math.min(D[i], D[i - 1] + a, D[i - W] + a, D[i - W - 1] + b, D[i - W + 1] + b);
+  }
+  for (let y = H - 2; y > 0; y--) for (let x = W - 2; x > 0; x--) {
+    const i = y * W + x; if (!D[i]) continue;
+    D[i] = Math.min(D[i], D[i + 1] + a, D[i + W] + a, D[i + W + 1] + b, D[i + W - 1] + b);
+  }
+  return D;
+}
+function clearOut(cx, cy, r, a) {
+  const D = a.dist || (a.dist = edgeField(a.mask));
+  const x0 = Math.max(1, Math.floor(cx - r)), x1 = Math.min(W - 2, Math.ceil(cx + r));
+  const y0 = Math.max(1, Math.floor(cy - r)), y1 = Math.min(H - 2, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x - cx, dy = y - cy;
+    if (dx * dx + dy * dy > r * r) continue;
+    const i = y * W + x, n = G[i], d = D[i];
+    if (!n || !d) continue;
+    const m = Math.floor(n * 0.9 + R());
+    if (!m) continue;
+    // downhill on the distance field leads to the nearest edge
+    let gx = D[i + 1] - D[i - 1], gy = D[i + W] - D[i - W];
+    const gl = Math.hypot(gx, gy) || 1; gx /= gl; gy /= gl;
+    G[i] = n - m;
+    const go = d + 1.5 + R() * 3;
+    drop(x - gx * go, y - gy * go, m);
+  }
+  touch(cx - r - 40, cy - r - 40, cx + r + 40, cy + r + 40);
+}
+// Angle of repose: a cell much higher than a neighbour slumps onto it.
+function relax() {
+  if (!BOX) return;
+  const [x0, y0, x1, y1] = BOX;
+  const lim = LAYER * 2.2;
+  for (let pass = 0; pass < 2; pass++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = y * W + x, n = G[i];
+    if (n < lim) continue;
+    const avg = (G[i - 1] + G[i + 1] + G[i - W] + G[i + W]) / 4;
+    const diff = n - avg;
+    if (diff > lim) {
+      const m = (diff / 10) | 0;
+      G[i] -= m * 4; G[i - 1] += m; G[i + 1] += m; G[i - W] += m; G[i + W] += m;
+    }
+  }
+  BOX = null;
+}
+
+// ---------- actions: what the hand does, and when ----------
+// spread: the palm lays a layer, approaching a target thickness where it passes
+// fill:   sand trickled into a soft mask along a back-and-forth path
+// leak:   a narrow stream along a path
+// finger / nail: a fingertip or fingernail cutting a line
+// palm:   the side of the palm sweeping
+// poke:   a fingertip pressed straight down (a pearl)
+const ACTIONS = [];
+const act = a => { ACTIONS.push(a); return a; };
+function zigzag(x0, y0, x1, y1, step) {
+  const pts = []; let flip = false;
+  for (let y = y0; y <= y1; y += step) { pts.push(flip ? [x1, y] : [x0, y]); pts.push(flip ? [x0, y] : [x1, y]); flip = !flip; }
+  return polyPath(pts);
+}
+function applyAction(a, tA, tB) {
+  const e = a.easeFn || (k => k);
+  const u0 = e(prog(tA, a.t0, a.t1)), u1 = e(prog(tB, a.t0, a.t1));
+  if (a.kind === 'poke') {
+    if (tA <= a.t0 && tB > a.t0) { const [x, y] = a.path.at(0); for (let k = 0; k < 3; k++) push(x, y, a.r, 0, 0, 0.97); relax(); }
+    return;
+  }
+  if (u1 <= u0) return;
+  const p0 = a.path.at(u0), p1 = a.path.at(u1);
+  const dist = Math.max(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), (u1 - u0) * a.path.total);   // along the path, not across it
+  const stepLen = a.kind === 'finger' || a.kind === 'nail' || a.kind === 'clear' ? Math.max(0.7, a.r * 0.3) : a.kind === 'palm' ? 2.5
+    : a.kind === 'spread' || a.kind === 'smooth' || a.kind === 'rub' ? a.r * 0.25 : a.kind === 'cast' ? 6 : Math.max(2, a.s * 0.8);
+  const steps = Math.max(1, Math.ceil(dist / stepLen));
+  const dt = (tB - tA) / steps;
+  for (let s = 0; s < steps; s++) {
+    const ua = lerp(u0, u1, s / steps), ub = lerp(u0, u1, (s + 1) / steps);
+    const pa = a.path.at(ua), pb = a.path.at(ub), vx = pb[0] - pa[0], vy = pb[1] - pa[1];
+    switch (a.kind) {
+      case 'spread': spreadStep(a, pb[0], pb[1], dt); break;
+      case 'fill': case 'leak': trickle(pb[0], pb[1], Math.floor(a.rate * dt + R()), a.s, a.mask); break;
+      case 'finger': case 'nail': {
+        const r = a.r * (a.pressFn ? a.pressFn(ub) : 1);
+        if (r > 0.5) push(pb[0], pb[1], r, vx, vy, a.strength ?? (a.kind === 'nail' ? 0.85 : 0.95), a.kind === 'nail' ? 0.3 : 0.6);
+        break;
+      }
+      case 'palm': palmEdge(pb[0], pb[1], a.r, vx, vy, a.strength ?? 0.94, a.streak ?? 0.35); break;
+      case 'clear': clearOut(pb[0], pb[1], a.r, a); break;
+      case 'cast': cast(pb[0], pb[1], vx, vy, Math.floor(a.rate * dt + R()), a.along, a.across); break;
+      case 'smooth': smoothUnder(pb[0], pb[1], a.r, a.amount ?? 0.5); break;
+      case 'rub': rubAround(pb[0], pb[1], a.r, a.ox, a.oy, a.amount ?? 0.35); break;
+    }
+  }
+  // The bank in front of a moving palm would slump back into the strip just
+  // cleared, leaving a line per tick; let it settle only once the sweep ends.
+  if (a.kind !== 'palm' || tB >= a.t1) relax(); else BOX = null;
+}
+// The palm spreading sand: cells near the palm grow towards the target.
+function spreadStep(a, cx, cy, dt) {
+  if (!a.added) a.added = new Float32Array(N);
+  const r = a.r, x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+  const k = a.rate * dt, inv = 1 / (2 * (r * 0.45) ** 2);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+    if (d2 > r * r) continue;
+    const i = y * W + x, want = a.target[i] - a.added[i];
+    if (want <= 0) continue;
+    const add = Math.min(want, a.target[i] * k * Math.exp(-d2 * inv));
+    const g = Math.floor(add + R());
+    a.added[i] += add;
+    if (g) G[i] = Math.min(65000, G[i] + g);
+  }
+}
+// Build a target thickness field (in grains) from a function of (x, y).
+function field(fn) { const f = new Float32Array(N); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) f[y * W + x] = Math.max(0, fn(x, y, y * W + x)) * LAYER; return f; }
+// A sweeping, looping palm route over a rectangle.
+function sweepRoute(x0, y0, x1, y1, loops, seed) {
+  const pts = [];
+  for (let i = 0; i <= 200; i++) {
+    const k = i / 200;
+    pts.push([lerp(x0, x1, 0.5 + 0.5 * Math.sin(k * Math.PI * 2 * loops + seed)), lerp(y0, y1, k) + Math.sin(k * 40 + seed) * 30]);
+  }
+  return polyPath(pts);
+}
+
+// ---------- the performance: 冬冬, six tableaux, ~61 s ----------
+// Each tableau is drawn on the glass by the hand, and the side of the palm
+// wipes it away into the next.
+const vignette = (x, y) => { const dx = (x - 640) / 640, dy = (y - 360) / 360; return Math.sqrt(dx * dx * 0.9 + dy * dy * 1.1); };
+const swing = (x0, y0, x1, y1, bow, seed) => path([[[x0, y0], [(x0 + x1) / 2, (y0 + y1) / 2 + bow], [x1, y1]]], 300, 6, seed);
+const loops = (cx, cy, rx, ry, turns, drift, seed) => polyPath(humanize(Array.from({ length: 400 }, (_, i) => {
+  const k = i / 399, a = k * Math.PI * 2 * turns;
+  return [cx + rx * Math.cos(a) + drift * (k - 0.5) * 2, cy + ry * Math.sin(a) * (0.7 + 0.3 * Math.sin(k * 5 + seed))];
+}), 8, seed));
+const dot = (x, y) => polyPath([[x, y], [x + 0.01, y]]);
+
+// a fist flinging sand on in fanning swings, alternating direction
+function castLayer(t0, gap, rows, rate, seed, rateFn = () => 1) {
+  rows.forEach(([y0, y1, bow], i) => {
+    const l2r = (i + seed) % 2 === 0;
+    act({ kind: 'cast', t0: t0 + i * gap, t1: t0 + i * gap + gap * 0.95, easeFn: glide, rate: rate * rateFn(i), along: 46, across: 70,
+      path: swing(l2r ? -60 : 1340, y0, l2r ? 1340 : -60, y1, bow, seed * 10 + i) });
+  });
+  return t0 + rows.length * gap;
+}
+// the side of the palm wiping the glass: overlapping curving passes
+function wipe(t0, dur, dir = 1, rows = [170, 360, 550], skip = null) {
+  const each = dur / (rows.length * 0.62 + 0.38);
+  rows.forEach((y, i) => {
+    const a = t0 + i * each * 0.62;
+    const [x0, x1] = skip && skip[i] ? skip[i] : dir > 0 ? [-90, 1390] : [1390, -90];
+    act({ kind: 'palm', t0: a, t1: a + each, r: 130, strength: 0.95, streak: 0.3, easeFn: glide,
+      path: path([[[x0, y + (i % 2 ? -18 : 22)], [(x0 + x1) / 2, y - 36 + i * 22], [x1, y + (i % 2 ? 16 : -14)]]], 600) });
+  });
+}
+// trickle sand into a shape with a fist moving back and forth over it
+function fillShape(t0, t1, drawPath, { feather = 2, s = 7, layers = 3.2, step = 14 } = {}) {
+  const mask = softMask(drawPath, feather);
+  let area = 0, x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const m = mask[y * W + x];
+    if (m > 0.05) { area += m; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  }
+  const rate = area * layers * LAYER / (t1 - t0) * 1.15;
+  act({ kind: 'fill', t0, t1, s, rate, mask, easeFn: glide, path: zigzag(x0 - 4, y0 + 2, x1 + 4, y1 + step / 2, step) });
+  return mask;
+}
+// a fingertip clearing a shape to light, scribbling back and forth inside it
+function clearShape(t0, t1, drawPath, { r = 14, feather = 1.5 } = {}) {
+  const mask = softMask(drawPath, feather);
+  let x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (let y = 0; y < H; y += 2) for (let x = 0; x < W; x += 2) if (mask[y * W + x] > 0.5) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+  const step = r * 0.85, tm = lerp(t0, t1, 0.62);
+  act({ kind: 'clear', t0, t1: tm, r, mask, easeFn: glide, path: zigzag(x0, y0 + r * 0.3, x1, y1, step) });
+  // a second, quicker pass across the first, so no rows of sand are left between strokes
+  const pts = []; let flip = false;
+  for (let x = x0 + r * 0.3; x <= x1; x += step * 1.3) { pts.push(flip ? [x, y1] : [x, y0]); pts.push(flip ? [x, y0] : [x, y1]); flip = !flip; }
+  act({ kind: 'clear', t0: tm, t1, r: r * 0.9, mask, easeFn: glide, path: polyPath(pts) });
+  return mask;
+}
+const finger = (t0, t1, pts, r, opts = {}) => act({ kind: 'finger', t0, t1, r, easeFn: stroke, path: polyPath(humanize(pts, opts.wob ?? 1, opts.seed ?? 0)), pressFn: opts.press, strength: opts.strength });
+const nail = (t0, t1, pts, seed = 0) => act({ kind: 'nail', t0, t1, r: 1.6, easeFn: stroke, path: polyPath(humanize(pts, 0.6, seed)) });
+const poke = (t, x, y, r) => act({ kind: 'poke', t0: t, t1: t + 0.05, r, path: dot(x, y) });
+const leak = (t0, t1, pts, rate, s = 4) => act({ kind: 'leak', t0, t1, s, rate, easeFn: stroke, path: polyPath(humanize(pts, 1, t0)) });
+const bez3 = (segs, n = 30) => { const pts = []; segs.forEach(([p0, c, p1], i) => { for (let j = i ? 1 : 0; j <= n; j++) pts.push(bez(p0, c, p1, j / n)); }); return pts; };
+const arcPts = (cx, cy, rx, ry, a0, a1, n = 40) => Array.from({ length: n + 1 }, (_, i) => { const a = lerp(a0, a1, i / n); return [cx + rx * Math.cos(a), cy + ry * Math.sin(a)]; });
+const ell = (c, x, y, rx, ry, rot = 0) => { c.beginPath(); c.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); c.fill(); };
+
+// shapes, drawn into soft masks
+function personShape(c, x, by, h, { f = 1, hair = 'short', skirt = false, stride = 0, carry = false } = {}) {
+  const hr = h * 0.075, hx = x + f * h * 0.012, hy = by - h * 0.915;
+  ell(c, hx, hy, hr * 0.92, hr);
+  if (hair === 'long') ell(c, hx - f * hr * 0.35, hy + hr * 0.9, hr * 0.85, hr * 1.7);
+  else ell(c, hx - f * hr * 0.1, hy - hr * 0.12, hr * 1.0, hr * 0.92);
+  c.fillRect(x - h * 0.022, hy + hr * 0.7, h * 0.044, h * 0.07);
+  const sh = by - h * 0.8, wa = by - h * 0.47;
+  c.beginPath(); c.moveTo(x - h * 0.105, sh + h * 0.02); c.quadraticCurveTo(x, sh - h * 0.02, x + h * 0.105, sh + h * 0.02);
+  c.lineTo(x + h * 0.08, wa); c.lineTo(x - h * 0.08, wa); c.closePath(); c.fill();
+  if (skirt) { c.beginPath(); c.moveTo(x - h * 0.08, wa - 2); c.lineTo(x + h * 0.08, wa - 2); c.lineTo(x + h * 0.15, by - h * 0.24); c.lineTo(x - h * 0.15, by - h * 0.24); c.closePath(); c.fill(); }
+  for (const s of [-1, 1]) {
+    const hip = x + s * h * 0.04, foot = x + s * h * 0.045 + s * stride * h * 0.12;
+    c.beginPath(); c.moveTo(hip - h * 0.04, wa); c.lineTo(hip + h * 0.04, wa); c.lineTo(foot + h * 0.022, by - h * 0.02); c.lineTo(foot + f * h * 0.06, by); c.lineTo(foot - h * 0.03, by); c.closePath(); c.fill();
+  }
+  c.lineCap = 'round'; c.lineWidth = h * 0.045;
+  const shX = x + f * h * 0.07;
+  c.beginPath(); c.moveTo(shX, sh + h * 0.04);
+  if (carry) c.quadraticCurveTo(shX + f * h * 0.06, sh + h * 0.2, shX + f * h * 0.16, sh + h * 0.3);
+  else c.quadraticCurveTo(shX + f * h * 0.03, sh + h * 0.2, shX + f * h * 0.01, sh + h * 0.36);
+  c.moveTo(x - f * h * 0.08, sh + h * 0.04); c.quadraticCurveTo(x - f * h * 0.11, sh + h * 0.2, x - f * h * 0.09, sh + h * 0.35);
+  c.stroke();
+}
+// 冬冬 from behind, sitting: round chinchilla
+function catBackShape(c, cx, by, s) {
+  for (const [x, y, rx, ry] of [[0, -66, 72, 74], [0, -128, 54, 42], [0, -178, 47, 44], [-32, -160, 24, 20], [32, -160, 24, 20]]) ell(c, cx + x * s, by + y * s, rx * s, ry * s);
+  for (const tri of [[[-42, -196], [-30, -232], [-10, -214]], [[42, -196], [30, -232], [10, -214]]]) { c.beginPath(); tri.forEach(([x, y], i) => i ? c.lineTo(cx + x * s, by + y * s) : c.moveTo(cx + x * s, by + y * s)); c.closePath(); c.fill(); }
+  c.lineCap = 'round';
+  bez3([[[cx + 52 * s, by - 12 * s], [cx + 150 * s, by + 2 * s], [cx + 168 * s, by - 46 * s]], [[cx + 168 * s, by - 46 * s], [cx + 176 * s, by - 80 * s], [cx + 150 * s, by - 88 * s]]], 16)
+    .forEach((q, i, a) => { if (!i) return; c.lineWidth = lerp(40, 22, i / a.length) * s; c.beginPath(); c.moveTo(...a[i - 1]); c.lineTo(...q); c.stroke(); });
+}
+function catBackFur(t0, cx, by, s, seed) {   // a fingernail flicks fur along the rim facing the light
+  for (let i = 0; i < 9; i++) {
+    const a = Math.PI * (1.1 + i * 0.09), r0 = 47 * s, x = cx + Math.cos(a) * r0, y = by - 178 * s + Math.sin(a) * 44 * s;
+    nail(t0 + i * 0.04, t0 + i * 0.04 + 0.08, [[x, y], [x + Math.cos(a) * 9 * s, y + Math.sin(a) * 9 * s]], seed + i);
+  }
+}
+
+// ===== 1. the title: 冬冬 written in fresh sand (0 - 10 s) =====
+castLayer(0.35, 0.36, [[160, 120, 90], [330, 300, -80], [480, 520, 70], [640, 660, -60], [60, 40, 40]], 1.6e7, 0);
+act({ kind: 'smooth', t0: 2.3, t1: 3.5, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 360, 420, 230, 2.2, 160, 2) });
+const DONG = [
+  { segs: [[[0.47, 0.06], [0.40, 0.18], [0.24, 0.34]]], w: 0.03 },
+  { segs: [[[0.38, 0.17], [0.55, 0.15], [0.72, 0.17]], [[0.72, 0.17], [0.58, 0.40], [0.24, 0.58]]], w: 0.028 },
+  { segs: [[[0.40, 0.30], [0.58, 0.47], [0.86, 0.60]]], w: 0.032, nab: true },
+  { segs: [[[0.46, 0.66], [0.50, 0.69], [0.54, 0.74]]], w: 0.034, dot: true },
+  { segs: [[[0.44, 0.82], [0.49, 0.86], [0.54, 0.91]]], w: 0.036, dot: true },
+];
+function writeDong(x, y, size, t0, dur, seed) {
+  const lens = DONG.map(s => s.segs.reduce((a, [p0, , p1]) => a + Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 0));
+  const total = lens.reduce((a, b) => a + b, 0) + DONG.length * 0.22;
+  let tt = t0;
+  DONG.forEach((s, i) => {
+    const d = dur * lens[i] / total, gap = dur * 0.22 / total;
+    const p = path(s.segs.map(seg => seg.map(([u, v]) => [x + u * size, y + v * size])), 24, size * 0.006, seed + i);
+    const press = s.nab ? (u => 0.55 + 0.65 * Math.pow(u, 1.2) * (u > 0.88 ? (1 - u) / 0.12 : 1))
+      : s.dot ? (u => 0.5 + 0.75 * Math.sin(Math.PI * u)) : (u => 0.5 + 0.6 * Math.sin(Math.PI * clamp(u * 1.1 - 0.05)));
+    act({ kind: 'finger', t0: tt, t1: tt + d, r: s.w * size, pressFn: press, path: p, easeFn: stroke });
+    tt += d + gap;
+  });
+}
+writeDong(330, 150, 340, 3.7, 1.9, 1);
+writeDong(640, 150, 340, 5.75, 1.9, 9);
+// a few pearls pressed under the name
+for (let i = 0; i < 9; i++) poke(7.9 + i * 0.06, 470 + i * 42, 600 + Math.sin(i * 0.9) * 8, 3 + (i % 3) * 0.7);
+wipe(8.65, 1.35, 1);
+
+// ===== 2. the night 冬冬 came: the cattery van at the door (10 - 20 s) =====
+const M2 = { x: 300, y: 165, r: 58 };
+castLayer(10.05, 0.2, [[110, 90, 50], [260, 300, -60], [430, 410, 50], [600, 640, -30]], 1.45e7, 1, i => i === 3 ? 1.5 : 1);
+act({ kind: 'smooth', t0: 10.85, t1: 11.35, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 330, 380, 200, 1.2, 140, 3) });
+act({ kind: 'rub', t0: 11.4, t1: 11.85, r: 80, ox: M2.x, oy: M2.y, amount: 0.12, easeFn: glide, path: ring(M2.x, M2.y, 56, 0, 1.8, 160, 3, 2) });
+act({ kind: 'finger', t0: 11.9, t1: 12.5, r: 13, strength: 0.97, easeFn: glide,
+  path: polyPath(humanize(Array.from({ length: 140 }, (_, i) => { const k = i / 139, a = k * Math.PI * 2 * 4.0; const rr = 3 + Math.min(1, k / 0.78) * (M2.r - 12); return [M2.x + rr * Math.cos(a), M2.y + rr * Math.sin(a)]; }), 1.2, 4)) });
+fillShape(12.55, 13.15, c => c.fillRect(0, 590, W, 130), { layers: 2.6, s: 9, step: 18 });
+fillShape(13.15, 14.05, c => {
+  c.beginPath(); c.moveTo(800, 592); c.lineTo(800, 404); c.lineTo(776, 404); c.lineTo(950, 300); c.lineTo(1126, 404); c.lineTo(1100, 404); c.lineTo(1100, 592); c.closePath(); c.fill();
+  c.fillRect(1036, 312, 30, 60);
+}, { layers: 3.4, s: 6, step: 12 });
+clearShape(14.1, 14.4, c => c.fillRect(832, 440, 58, 50), { r: 9 });
+clearShape(14.4, 14.75, c => c.fillRect(932, 474, 46, 116), { r: 10 });
+// the van, then light from its headlights cut as rays
+fillShape(14.8, 15.6, c => {
+  const x = 110, by = 604;
+  c.beginPath(); c.moveTo(x, by - 22); c.lineTo(x, by - 118); c.quadraticCurveTo(x, by - 128, x + 12, by - 128); c.lineTo(x + 214, by - 128);
+  c.quadraticCurveTo(x + 236, by - 128, x + 248, by - 100); c.lineTo(x + 278, by - 64); c.quadraticCurveTo(x + 296, by - 60, x + 298, by - 40); c.lineTo(x + 298, by - 22); c.closePath(); c.fill();
+  ell(c, x + 58, by - 18, 22, 22); ell(c, x + 236, by - 18, 22, 22);
+}, { layers: 3.4, s: 6, step: 12 });
+clearShape(15.6, 15.85, c => { c.beginPath(); c.moveTo(330, 488); c.lineTo(354, 488); c.lineTo(376, 528); c.lineTo(330, 528); c.closePath(); c.fill(); c.fillRect(260, 488, 56, 38); }, { r: 7 });
+clearShape(15.9, 16.25, c => { c.beginPath(); c.moveTo(408, 548); c.lineTo(600, 508); c.lineTo(620, 588); c.lineTo(408, 562); c.closePath(); c.fill(); }, { r: 9, feather: 10 });
+// the couple waiting by the house, the seller carrying the kitten over
+fillShape(16.3, 17.1, c => { personShape(c, 700, 590, 140, { f: -1, hair: 'long', skirt: true }); personShape(c, 748, 590, 156, { f: -1 }); }, { layers: 3.6, s: 4, step: 8, feather: 1.2 });
+fillShape(17.1, 17.75, c => { personShape(c, 572, 590, 150, { f: 1, carry: true }); c.fillRect(592, 520, 52, 36); c.lineWidth = 5; c.beginPath(); c.moveTo(604, 520); c.quadraticCurveTo(618, 500, 632, 520); c.stroke(); }, { layers: 3.6, s: 4, step: 8, feather: 1.2 });
+poke(17.85, 620, 536, 2.6); poke(17.95, 633, 536, 2.6);   // two eyes light up in the carrier
+[[120, 70], [480, 110], [620, 60], [760, 150], [1180, 80], [1060, 200], [520, 250]].forEach(([x, y], i) => poke(18.05 + i * 0.05, x, y, 2.2 + (i % 2)));
+wipe(18.6, 1.35, -1);
+
+// ===== 3. first meeting: 冬冬 in our cupped hands (20 - 30 s) =====
+castLayer(20.05, 0.2, [[140, 120, 50], [320, 300, -60], [500, 520, 50], [660, 680, -30]], 1.9e7, 0);
+act({ kind: 'smooth', t0: 20.85, t1: 21.35, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 360, 400, 220, 1.2, 140, 5) });
+act({ kind: 'rub', t0: 21.4, t1: 21.9, r: 120, ox: 640, oy: 370, amount: 0.1, easeFn: glide, path: ring(640, 370, 90, 0, 1.6, 160, 4, 6) });
+const HANDS = c => {
+  // two hands held together like a bowl, seen from the front: fingertips curl over the rim
+  c.beginPath();
+  c.moveTo(370, 760); c.bezierCurveTo(330, 640, 340, 540, 392, 486);
+  [[418, 466], [452, 456], [488, 452], [524, 456]].forEach(([x, y]) => c.bezierCurveTo(x - 22, y - 30, x + 6, y - 32, x, y));
+  c.bezierCurveTo(580, 486, 700, 486, 756, 456);
+  [[792, 452], [828, 456], [862, 466], [888, 486]].forEach(([x, y]) => c.bezierCurveTo(x - 6, y - 32, x + 22, y - 30, x, y));
+  c.bezierCurveTo(940, 540, 950, 640, 910, 760); c.closePath(); c.fill();
+  ell(c, 640, 740, 250, 70);
+};
+fillShape(21.95, 23.35, HANDS, { layers: 4.2, s: 8, step: 14, feather: 2 });
+// 冬冬 cleared out as light, peeking over the rim: a round fluffy head, small ears, shoulders
+const KITTEN = c => {
+  ell(c, 640, 360, 92, 84); ell(c, 572, 398, 40, 34); ell(c, 708, 398, 40, 34); ell(c, 640, 470, 112, 50);
+  for (const s of [-1, 1]) { c.beginPath(); c.moveTo(640 + s * 46, 296); c.quadraticCurveTo(640 + s * 70, 250, 640 + s * 86, 246); c.quadraticCurveTo(640 + s * 96, 290, 640 + s * 90, 326); c.closePath(); c.fill(); }
+};
+clearShape(23.4, 24.9, c => { c.save(); KITTEN(c); c.globalCompositeOperation = 'destination-out'; c.fillStyle = '#000'; HANDS(c); c.restore(); }, { r: 13 });
+// fluff: the fingernail flicks light strands out of the outline
+for (let i = 0; i < 22; i++) {
+  const a = Math.PI * (0.95 + i * 0.05), x = 640 + Math.cos(a) * 92, y = 360 + Math.sin(a) * 84;
+  nail(24.95 + i * 0.025, 25.0 + i * 0.025, [[x - Math.cos(a) * 3, y - Math.sin(a) * 3], [x + Math.cos(a) * 11, y + Math.sin(a) * 11]], i);
+}
+// eyes and a nose: a pinch of sand each
+[[604, 356], [676, 356]].forEach(([x, y], i) => leak(25.6 + i * 0.22, 25.75 + i * 0.22, [[x - 5, y], [x + 5, y + 1]], 4.2e5, 3.6));
+leak(26.1, 26.22, [[635, 394], [645, 394]], 1.8e5, 2.6);
+leak(26.25, 26.45, [[624, 414], [640, 407], [656, 414]], 1.0e5, 1.6);
+poke(26.55, 599, 348, 2.4); poke(26.62, 671, 348, 2.4);   // catchlights
+// the hands: fingers parted with a fingernail, and a few pearls around
+[[452, 470, 448, 540], [490, 466, 488, 532], [790, 466, 792, 532], [828, 470, 832, 540]].forEach(([x0, y0, x1, y1], i) => nail(26.8 + i * 0.12, 26.92 + i * 0.12, [[x0, y0], [(x0 + x1) / 2 + 3, (y0 + y1) / 2], [x1, y1]], 30 + i));
+for (let i = 0; i < 12; i++) { const a = -Math.PI * 0.92 + i * 0.155; poke(27.4 + i * 0.06, 640 + Math.cos(a) * 200, 380 + Math.sin(a) * 170, 3 + (i % 3) * 0.6); }
+wipe(28.6, 1.35, 1);
+
+// ===== 4. our days: the sofa, the lamp, 冬冬 chasing yarn (30 - 40 s) =====
+castLayer(30.05, 0.2, [[140, 110, 50], [320, 300, -60], [480, 500, 50], [650, 670, -30]], 0.95e7, 1);
+act({ kind: 'smooth', t0: 30.6, t1: 30.9, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 380, 400, 200, 0.9, 140, 7) });
+act({ kind: 'rub', t0: 30.9, t1: 31.35, r: 170, ox: 620, oy: 420, amount: 0.12, easeFn: glide, path: ring(620, 420, 150, 0, 1.4, 160, 4, 9) });
+leak(31.35, 31.85, [[40, 652], [640, 648], [1240, 654]], 1.9e5, 5);   // the floor line
+fillShape(31.9, 33.0, c => {
+  c.beginPath(); c.roundRect(250, 380, 560, 110, 40); c.fill();
+  c.beginPath(); c.roundRect(222, 450, 616, 140, 30); c.fill();
+  c.fillRect(250, 588, 18, 60); c.fillRect(792, 588, 18, 60);
+}, { layers: 3.6, s: 7, step: 13 });
+fillShape(33.0, 33.8, c => {
+  ell(c, 478, 318, 30, 34, 0.2); ell(c, 466, 352, 30, 52, 0.25); ell(c, 568, 302, 31, 35, -0.15);
+  c.beginPath(); c.moveTo(418, 470); c.quadraticCurveTo(428, 360, 490, 352); c.quadraticCurveTo(538, 360, 530, 470); c.fill();
+  c.beginPath(); c.moveTo(516, 470); c.quadraticCurveTo(528, 344, 578, 336); c.quadraticCurveTo(634, 344, 632, 470); c.fill();
+}, { layers: 3.6, s: 4, step: 8, feather: 1.2 });
+// the lamp, its glow rubbed into the sand around it
+act({ kind: 'rub', t0: 33.85, t1: 34.3, r: 110, ox: 1060, oy: 300, amount: 0.12, easeFn: glide, path: ring(1060, 300, 70, 0, 1.6, 140, 3, 8) });
+leak(34.3, 34.6, [[1060, 330], [1062, 480], [1060, 646]], 1.6e5, 3.5);
+fillShape(34.6, 34.95, c => { c.beginPath(); c.moveTo(1020, 330); c.lineTo(1100, 330); c.lineTo(1080, 268); c.lineTo(1040, 268); c.closePath(); c.fill(); }, { layers: 3.4, s: 4, step: 8 });
+// 冬冬 pouncing at a ball of yarn on the floor
+fillShape(35.0, 35.75, c => {
+  c.save(); c.translate(930, 648); c.rotate(-0.18);
+  ell(c, 0, -40, 60, 34); ell(c, 52, -72, 32, 30);
+  for (const ex of [36, 66]) { c.beginPath(); c.moveTo(ex - 12, -92); c.lineTo(ex, -118); c.lineTo(ex + 12, -92); c.closePath(); c.fill(); }
+  c.lineCap = 'round'; c.lineWidth = 16; for (const lx of [-36, -14, 22, 40]) { c.beginPath(); c.moveTo(lx, -24); c.lineTo(lx + 6, -2); c.stroke(); }
+  c.lineWidth = 20; c.beginPath(); c.moveTo(-52, -52); c.quadraticCurveTo(-100, -70, -90, -120); c.stroke();
+  c.restore();
+  ell(c, 1090, 612, 34, 34);
+}, { layers: 3.6, s: 4, step: 8, feather: 1.2 });
+[[1066, 600, 1112, 620], [1074, 590, 1104, 634], [1068, 618, 1110, 598]].forEach(([x0, y0, x1, y1], i) => finger(35.8 + i * 0.12, 35.92 + i * 0.12, [[x0, y0], [(x0 + x1) / 2 + 6, (y0 + y1) / 2 - 6], [x1, y1]], 3, { seed: 40 + i }));
+leak(36.2, 36.55, bez3([[[1090, 646], [1150, 680], [1230, 650]]], 20), 0.6e5, 2.2);   // a loose thread
+poke(36.6, 994, 576, 2.6);   // her eye, bright
+// a heart drawn above the two of them
+finger(36.8, 37.6, bez3([[[524, 250], [470, 200], [500, 176]], [[500, 176], [518, 166], [524, 192]], [[524, 192], [530, 166], [548, 176]], [[548, 176], [578, 200], [524, 250]]], 14), 4.5, { wob: 0.5, seed: 50 });
+wipe(38.6, 1.35, -1);
+
+// ===== 5. the window: seasons pass, 冬冬 grows up (40 - 50 s) =====
+castLayer(40.05, 0.2, [[120, 100, 50], [300, 280, -60], [480, 500, 50], [650, 670, -30]], 2.4e7, 0);
+act({ kind: 'smooth', t0: 40.85, t1: 41.25, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 360, 400, 220, 1.2, 140, 9) });
+const ARCH = c => { const x0 = 440, x1 = 840, y0 = 90, y1 = 500, r = (x1 - x0) / 2; c.beginPath(); c.moveTo(x0, y1); c.lineTo(x0, y0 + r); c.arc((x0 + x1) / 2, y0 + r, r, Math.PI, 0); c.lineTo(x1, y1); c.closePath(); c.fill(); };
+clearShape(41.3, 42.5, ARCH, { r: 18 });
+fillShape(42.5, 42.78, ARCH, { layers: 0.4, s: 9, step: 8 });   // a breath of sand over the glass, for the sky outside
+leak(42.8, 43.05, [[640, 98], [641, 300], [640, 498]], 1.6e5, 3.2);
+leak(43.05, 43.3, [[446, 300], [640, 302], [834, 300]], 1.6e5, 3.2);
+fillShape(43.3, 43.6, c => c.fillRect(410, 498, 460, 26), { layers: 3.6, s: 4, step: 8 });
+fillShape(43.6, 44.0, c => catBackShape(c, 640, 500, 0.42), { layers: 3.6, s: 3.5, step: 7, feather: 1 });
+// spring: a branch in blossom outside
+leak(44.05, 44.4, bez3([[[838, 170], [760, 190], [700, 250]], [[700, 250], [680, 270], [660, 268]]], 24), 1.1e5, 3);
+leak(44.4, 44.55, bez3([[[760, 192], [740, 150], [710, 140]]], 12), 0.8e5, 2.4);
+[[710, 140], [662, 268], [740, 220], [790, 180], [700, 248]].forEach(([x, y], i) => { leak(44.6 + i * 0.1, 44.66 + i * 0.1, [[x - 3, y], [x + 3, y]], 1.6e5, 5); poke(44.66 + i * 0.1, x, y, 2); });
+// the year turns: the palm brushes the branch away, snow is pressed in, settling on the sill
+for (let i = 0; i < 26; i++) {
+  const x = 460 + hash(i + 3) * 360, y = 120 + hash(i + 9) * 360;
+  if (Math.abs(x - 640) < 8 || Math.abs(y - 300) < 8) continue;
+  poke(45.65 + i * 0.035, x, y, 1.8 + hash(i) * 1.6);
+}
+nail(46.6, 46.9, [[414, 497], [640, 495], [866, 497]], 60);
+// 冬冬 grown: the old kitten is brushed off the sill, a big fluffy cat drawn in its place
+act({ kind: 'palm', t0: 47.0, t1: 47.35, r: 52, strength: 0.95, streak: 0.2, easeFn: glide, path: path([[[560, 452], [640, 448], [730, 452]]], 200) });
+fillShape(47.4, 48.1, c => catBackShape(c, 640, 500, 0.8), { layers: 3.8, s: 4, step: 8, feather: 1 });
+catBackFur(48.15, 640, 500, 0.8, 70);
+wipe(48.6, 1.35, 1);
+
+// ===== 6. the rooftop under the moon; then only the moon, and our thanks (50 - 61 s) =====
+const M6 = { x: 400, y: 230, r: 80 };
+castLayer(50.05, 0.2, [[110, 90, 50], [290, 270, -60], [460, 480, 50], [640, 660, -30]], 1.15e7, 1, i => i === 3 ? 1.6 : 1);
+act({ kind: 'smooth', t0: 50.85, t1: 51.25, r: 150, amount: 0.7, easeFn: glide, path: loops(640, 340, 380, 200, 1.2, 140, 11) });
+act({ kind: 'rub', t0: 51.3, t1: 51.75, r: 100, ox: M6.x, oy: M6.y, amount: 0.12, easeFn: glide, path: ring(M6.x, M6.y, 74, 0, 1.8, 160, 3, 12) });
+act({ kind: 'rub', t0: 52.5, t1: 52.9, r: 150, ox: 820, oy: 470, amount: 0.12, easeFn: glide, path: ring(820, 470, 120, 0, 1.3, 140, 4, 14) });
+act({ kind: 'finger', t0: 51.8, t1: 52.5, r: 15, strength: 0.97, easeFn: glide,
+  path: polyPath(humanize(Array.from({ length: 160 }, (_, i) => { const k = i / 159, a = k * Math.PI * 2 * 4.4; const rr = 4 + Math.min(1, k / 0.78) * (M6.r - 14); return [M6.x + rr * Math.cos(a), M6.y + rr * Math.sin(a)]; }), 1.5, 13)) });
+fillShape(52.9, 53.4, c => { c.beginPath(); c.moveTo(540, 720); c.lineTo(592, 590); c.quadraticCurveTo(600, 582, 620, 582); c.lineTo(1170, 584); c.lineTo(1290, 640); c.lineTo(1290, 720); c.closePath(); c.fill(); }, { layers: 3.4, s: 9, step: 16 });
+fillShape(53.4, 54.2, c => {
+  const seated = (x, top, w) => { c.beginPath(); c.moveTo(x - w * 0.5, 586); c.lineTo(x - w * 0.52, top + 34); c.quadraticCurveTo(x - w * 0.5, top + 6, x - w * 0.2, top + 2); c.lineTo(x + w * 0.2, top + 2); c.quadraticCurveTo(x + w * 0.5, top + 6, x + w * 0.52, top + 34); c.lineTo(x + w * 0.5, 586); c.closePath(); c.fill(); c.fillRect(x - 9, top - 14, 18, 20); };
+  seated(700, 470, 78); seated(780, 446, 92);
+  ell(c, 722, 432, 24, 27, 0.35); ell(c, 708, 466, 25, 44, 0.15); ell(c, 776, 404, 27, 30, -0.08); ell(c, 773, 390, 28, 20);
+  catBackShape(c, 900, 584, 0.62);
+}, { layers: 3.8, s: 4, step: 8, feather: 1.2 });
+catBackFur(54.25, 900, 584, 0.62, 80);
+[[150, 90], [600, 110], [760, 70], [880, 150], [1010, 90], [1130, 170], [560, 300]].forEach(([x, y], i) => poke(54.7 + i * 0.05, x, y, 2.4 + (i % 2)));
+// the palm wipes everything away but the moon
+wipe(55.3, 1.4, 1, [470, 640]);
+// a finger writes, beside the moon: 冬冬, and then 谢谢你
+writeDong(640, 150, 220, 56.85, 1.5, 21);
+writeDong(840, 150, 220, 58.4, 1.3, 31);
+// 谢谢你 is added once the font has loaded (its strokes come from the glyphs' skeletons)
+const ENDING_TEXT = { str: '谢谢你', x: 660, y: 470, size: 92, t0: 59.85, dur: 1.9 };
+const DURATION = 63.5;
+
+// ---------- writing any character with a finger ----------
+// The glyph is rendered, thinned to a one-pixel skeleton (Zhang-Suen), and the
+// skeleton traced into strokes, ordered top to bottom, left to right.
+function glyphStrokes(ch, x, y, size) {
+  const S = Math.ceil(size * 1.3), c = new OffscreenCanvas(S, S), g = c.getContext('2d', { willReadFrequently: true });
+  g.font = `${size}px "WenQuanYi Zen Hei", sans-serif`; g.textBaseline = 'middle'; g.textAlign = 'center';
+  g.fillStyle = '#000'; g.fillText(ch, S / 2, S / 2);
+  const d = g.getImageData(0, 0, S, S).data, B = new Uint8Array(S * S);
+  for (let i = 0; i < S * S; i++) B[i] = d[i * 4 + 3] > 110 ? 1 : 0;
+  const at = (x, y) => x >= 0 && y >= 0 && x < S && y < S ? B[y * S + x] : 0;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const step of [0, 1]) {
+      const del = [];
+      for (let yy = 1; yy < S - 1; yy++) for (let xx = 1; xx < S - 1; xx++) {
+        if (!B[yy * S + xx]) continue;
+        const p = [at(xx, yy - 1), at(xx + 1, yy - 1), at(xx + 1, yy), at(xx + 1, yy + 1), at(xx, yy + 1), at(xx - 1, yy + 1), at(xx - 1, yy), at(xx - 1, yy - 1)];
+        const nb = p.reduce((a, b) => a + b, 0);
+        if (nb < 2 || nb > 6) continue;
+        let tr = 0; for (let k = 0; k < 8; k++) if (!p[k] && p[(k + 1) % 8]) tr++;
+        if (tr !== 1) continue;
+        if (step === 0 ? (p[0] * p[2] * p[4] || p[2] * p[4] * p[6]) : (p[0] * p[2] * p[6] || p[0] * p[4] * p[6])) continue;
+        del.push(yy * S + xx);
+      }
+      if (del.length) { changed = true; del.forEach(i => { B[i] = 0; }); }
+    }
+  }
+  const N8 = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+  const seen = new Uint8Array(S * S), deg = i => { const xx = i % S, yy = (i / S) | 0; return N8.reduce((a, [dx, dy]) => a + at(xx + dx, yy + dy), 0); };
+  const strokes = [];
+  const walk = start => {
+    const pts = [start]; seen[start] = 1;
+    let cur = start, dir = null;
+    for (;;) {
+      const cx = cur % S, cy = (cur / S) | 0;
+      let best = -1, bestScore = 1e9;
+      for (const [dx, dy] of N8) {
+        const nx = cx + dx, ny = cy + dy, j = ny * S + nx;
+        if (!at(nx, ny) || seen[j]) continue;
+        const score = dir ? Math.hypot(dx - dir[0], dy - dir[1]) : 0;
+        if (score < bestScore) { bestScore = score; best = j; }
+      }
+      if (best < 0) break;
+      dir = [best % S - cx, ((best / S) | 0) - cy];
+      seen[best] = 1; pts.push(best); cur = best;
+    }
+    return pts;
+  };
+  for (let pass = 0; pass < 2; pass++) for (let i = 0; i < S * S; i++) {
+    if (!B[i] || seen[i] || (pass === 0 && deg(i) !== 1)) continue;
+    const pts = walk(i);
+    if (pts.length >= 6) strokes.push(pts.map(j => [j % S, (j / S) | 0]));
+  }
+  return strokes.map(pts => {
+    // start where a hand would: the top, or the left of a horizontal stroke
+    const a = pts[0], b = pts[pts.length - 1];
+    if (b[1] + b[0] * 0.6 < a[1] + a[0] * 0.6) pts.reverse();
+    const sm = pts.filter((_, i) => i % 2 === 0 || i === pts.length - 1).map((p, i, arr) => {
+      const q = arr[Math.max(0, i - 1)], r = arr[Math.min(arr.length - 1, i + 1)];
+      return [x - S / 2 + (q[0] + p[0] + r[0]) / 3, y - S / 2 + (q[1] + p[1] + r[1]) / 3];
+    });
+    return sm;
+  }).sort((p, q) => {
+    const ay = Math.min(...p.map(v => v[1])), by = Math.min(...q.map(v => v[1]));
+    return Math.abs(ay - by) > size * 0.12 ? ay - by : Math.min(...p.map(v => v[0])) - Math.min(...q.map(v => v[0]));
+  });
+}
+function writeText({ str, x, y, size, t0, dur }) {
+  const chars = [...str], per = dur / chars.length;
+  chars.forEach((ch, ci) => {
+    const strokes = glyphStrokes(ch, x + (ci - (chars.length - 1) / 2) * size * 1.05, y, size);
+    const lens = strokes.map(s => s.reduce((a, p, i) => i ? a + Math.hypot(p[0] - s[i - 1][0], p[1] - s[i - 1][1]) : 0, 0) + size * 0.25);
+    const total = lens.reduce((a, b) => a + b, 0);
+    let tt = t0 + ci * per;
+    strokes.forEach((pts, si) => {
+      const d = per * 0.92 * lens[si] / total;
+      act({ kind: 'finger', t0: tt, t1: tt + d * 0.8, r: size * 0.04, easeFn: stroke, path: polyPath(humanize(pts, 0.6, ci * 10 + si)),
+        pressFn: u => 0.55 + 0.55 * Math.sin(Math.PI * clamp(u * 1.1 - 0.05)) });
+      tt += d;
+    });
+  });
+}
+
+// ---------- the hand ----------
+// A backlit hand hovering over the glass: near-black, slightly soft. Poses:
+// point (finger strokes, pokes), fist (casting, trickling), edge (the side of
+// the palm wiping), flat (palm smoothing or rubbing). Between actions it lifts
+// and travels to the next one; for long gaps it leaves the glass.
+const POSE = { finger: 'point', nail: 'point', poke: 'point', clear: 'point', cast: 'fist', fill: 'fist', leak: 'fist', palm: 'edge', smooth: 'flat', rub: 'flat' };
+const handLayer = new OffscreenCanvas(W, H), hctx = handLayer.getContext('2d');
+const REST = [1420, 900];   // off the glass, lower right
+function poseOf(a, t) {
+  const u = (a.easeFn || (k => k))(prog(t, a.t0, a.t1));
+  const [x, y] = a.kind === 'poke' ? a.path.at(0) : a.path.at(u);
+  const q = a.kind === 'poke' ? [x, y + 1] : a.path.at(clamp(u + 0.01));
+  return { x, y, pose: POSE[a.kind], dir: Math.atan2(q[1] - y, q[0] - x), lift: 0 };
+}
+function handAt(t) {
+  const acts = ACTIONS.slice().sort((a, b) => a.t0 - b.t0);
+  const cur = acts.find(a => t >= a.t0 && t <= a.t1);
+  if (cur) return poseOf(cur, t);
+  const prev = acts.filter(a => a.t1 < t).pop(), next = acts.find(a => a.t0 > t);
+  const from = prev ? poseOf(prev, prev.t1) : { x: REST[0], y: REST[1], pose: next ? POSE[next.kind] : 'point', dir: 0 };
+  const to = next ? poseOf(next, next.t0) : { x: REST[0], y: REST[1], pose: from.pose, dir: from.dir };
+  const t0 = prev ? prev.t1 : (next ? next.t0 - 0.6 : 0), t1 = next ? next.t0 : t0 + 0.6;
+  const gap = t1 - t0;
+  if (gap > 1.4) {   // leave the glass, come back later
+    if (t - t0 < 0.5) { const k = glide(prog(t, t0, t0 + 0.5)); return { ...from, x: lerp(from.x, REST[0], k), y: lerp(from.y, REST[1], k), lift: k }; }
+    if (t1 - t < 0.5) { const k = glide(prog(t, t1 - 0.5, t1)); return { ...to, x: lerp(REST[0], to.x, k), y: lerp(REST[1], to.y, k), lift: 1 - k }; }
+    return null;
+  }
+  const k = glide(prog(t, t0, t1));
+  return { x: lerp(from.x, to.x, k), y: lerp(from.y, to.y, k), pose: k < 0.5 ? from.pose : to.pose, dir: k < 0.5 ? from.dir : to.dir, lift: Math.sin(Math.PI * k) * 0.8 };
+}
+// Hand silhouettes, drawn as smooth closed outlines (Catmull-Rom through the
+// points). Local axes: fingers towards -y, the forearm running off towards +y.
+const HAND = {
+  // index finger down on the glass, the other fingers curled under, thumb along the side
+  point: [[0, 0], [11, 6], [14, 42], [16, 82], [30, 88], [46, 94], [56, 100], [66, 110], [76, 122], [86, 138], [92, 160], [94, 196], [88, 232], [80, 264], [80, 300],
+    [94, 430], [108, 640], [110, 760], [-50, 760], [-40, 640], [-28, 430], [-20, 300], [-24, 262], [-42, 232], [-60, 204], [-68, 176], [-62, 152], [-46, 148], [-32, 160], [-18, 140],
+    [-13, 92], [-12, 44], [-9, 6]],
+  // a loose fist, knuckles forward, sand running out underneath
+  fist: [[-52, -8], [-38, -28], [-17, -35], [4, -37], [25, -33], [43, -23], [55, -4], [60, 22], [57, 50], [47, 82], [42, 112], [54, 270], [68, 530], [72, 760],
+    [-54, 760], [-48, 530], [-38, 270], [-36, 112], [-42, 84], [-60, 56], [-68, 28], [-62, 6]],
+  // flat palm, fingers together and slightly spread
+  flat: [[-82, -42], [-90, -10], [-74, 30], [-64, 64], [-54, 104], [-46, 142], [-52, 300], [-60, 760], [70, 760], [64, 300], [54, 142], [62, 92], [64, 32], [58, -40],
+    [54, -82], [48, -118], [38, -134], [28, -132], [22, -116], [22, -98], [26, -112], [26, -142], [20, -162], [10, -166], [4, -152], [2, -114], [4, -132], [2, -164], [-4, -176],
+    [-14, -176], [-20, -162], [-20, -118], [-22, -132], [-26, -154], [-34, -160], [-42, -156], [-46, -140], [-44, -100], [-50, -72], [-64, -60], [-76, -56]],
+  // on its side: the little-finger edge on the glass (front, +x), thumb up
+  edge: [[0, -122], [14, -114], [19, -62], [18, -6], [28, -16], [48, -28], [58, -22], [50, -4], [26, 14], [19, 46], [15, 94], [17, 124], [42, 270], [74, 530], [84, 760],
+    [-70, 760], [-50, 510], [-32, 270], [-24, 124], [-20, 62], [-20, -40], [-14, -104]],
+};
+function spline(c, pts) {
+  const n = pts.length, P = i => pts[(i + n) % n];
+  c.beginPath(); c.moveTo(...P(0));
+  for (let i = 0; i < n; i++) {
+    const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+    c.bezierCurveTo(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6, p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, p2[0], p2[1]);
+  }
+  c.closePath(); c.fill();
+}
+function drawHand(h, t) {
+  if (!h) return;
+  const c = hctx;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = '#0b0502';
+  const sway = Math.sin(t * 1.7) * 0.035 + Math.sin(t * 0.6) * 0.02;
+  const lift = h.lift || 0;   // lifting brings the hand towards the camera: bigger, softer
+  c.translate(h.x + lift * 18, h.y + lift * 26);
+  c.scale(1.12 + lift * 0.08, 1.12 + lift * 0.08);
+  if (h.pose === 'edge') {
+    // wiping with the side of the palm, the hand is tilted: from above we see
+    // the back of the hand foreshortened, fingers together along the edge
+    c.rotate(h.dir - 0.28 + sway * 0.4);
+    c.scale(0.58, 1.06);
+    spline(c, HAND.flat);
+  } else {
+    c.rotate(-0.6 + sway);
+    spline(c, HAND[h.pose]);
+  }
+  const main = canvas.getContext('2d');
+  main.save();
+  main.filter = `blur(${2.5 + lift * 5}px)`;
+  main.globalAlpha = (0.88 - lift * 0.2) * DIM;
+  main.drawImage(handLayer, 0, 0);
+  main.restore();
+}
+
+// ---------- simulation clock ----------
+let simT = 0;
+function resetSim() { G.fill(0); R = mulberry(SEED); simT = 0; for (const a of ACTIONS) a.added = null; }
+function advance(t) {
+  if (t < simT - 1e-6) resetSim();
+  const dt = 1 / FPS / 2;
+  while (simT < t - 1e-9) {
+    const tB = Math.min(t, simT + dt);
+    for (const a of ACTIONS) if (tB > a.t0 && simT < a.t1 + 1e-3) applyAction(a, Math.max(simT, a.t0), Math.min(tB, a.t1));
+    simT = tB;
+  }
+}
+
+// ---------- light through the sand ----------
+// Transmission is mapped through the light box's palette: clean glass is a
+// warm cream, thin sand golden, thicker amber, thick sand a deep brown-black.
+const STOPS = [[0, [12, 6, 3]], [0.05, [44, 20, 8]], [0.18, [112, 56, 18]], [0.4, [190, 116, 42]], [0.62, [234, 176, 88]], [0.84, [250, 220, 148]], [1, [255, 244, 214]]];
+const LUT = new Uint8Array(1024 * 3);
+for (let i = 0; i < 1024; i++) {
+  const T = i / 1023;
+  let j = 0; while (j < STOPS.length - 2 && T > STOPS[j + 1][0]) j++;
+  const [ta, ca] = STOPS[j], [tb, cb] = STOPS[j + 1], k = (T - ta) / (tb - ta);
+  for (let c = 0; c < 3; c++) LUT[i * 3 + c] = lerp(ca[c], cb[c], k);
+}
+const ABS = new Float32Array(65536);
+for (let n = 0; n < 65536; n++) ABS[n] = Math.exp(-ABSORB * n);
+let LAMP = null;   // the light box is a little brighter in the middle
+function lamp() { const L = new Float32Array(N); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) L[y * W + x] = 1 - 0.18 * clamp(vignette(x, y) - 0.3); return L; }
+let DIM = 1;
+function shade() {
+  const o = img.data;
+  for (let i = 0, p = 0; i < N; i++, p += 4) {
+    const T = ABS[G[i]] * LAMP[i] * DIM, q = ((T * 1023) | 0) * 3;
+    o[p] = LUT[q]; o[p + 1] = LUT[q + 1]; o[p + 2] = LUT[q + 2]; o[p + 3] = 255;
+  }
+  fctx.putImageData(img, 0, 0);
+  ctx.save(); ctx.filter = 'blur(0.85px)'; ctx.drawImage(frame, 0, 0); ctx.restore();   // camera optics
+  bctx.filter = 'blur(8px)'; bctx.clearRect(0, 0, bloom.width, bloom.height); bctx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
+  ctx.save(); ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = 0.22; ctx.drawImage(bloom, 0, 0, W, H); ctx.restore();
+}
+
+function renderFrame(t) {
+  t = clamp(t, 0, DURATION);
+  advance(t);
+  DIM = 1 - prog(t, DURATION - 1.6, DURATION) * 0.97;
+  shade();
+  drawHand(handAt(t), t);
+}
+
+window.FPS = FPS;
+window.DURATION = DURATION;
+window.renderFrame = renderFrame;
+window.ready = (async () => {
+  await document.fonts.load('92px "WenQuanYi Zen Hei"', '谢谢你').catch(() => {});
+  writeText(ENDING_TEXT);
+  LAMP = lamp();
+  renderFrame(0);
+  return true;
+})();
+
+if (!location.search.includes('render')) {
+  window.ready.then(() => {
+    const start = performance.now();
+    const tick = now => { renderFrame(((now - start) / 1000) % DURATION); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
+}
+</script>
+</body>
+</html>

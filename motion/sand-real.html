@@ -295,7 +295,7 @@ function applyAction(a, tA, tB) {
   }
   if (u1 <= u0) return;
   const p0 = a.path.at(u0), p1 = a.path.at(u1);
-  const dist = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  const dist = Math.max(Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), (u1 - u0) * a.path.total);   // along the path, not across it
   const stepLen = a.kind === 'finger' || a.kind === 'nail' ? Math.max(0.7, a.r * 0.3) : a.kind === 'palm' ? 2.5
     : a.kind === 'spread' || a.kind === 'smooth' || a.kind === 'rub' ? a.r * 0.25 : a.kind === 'cast' ? 6 : Math.max(2, a.s * 0.8);
   const steps = Math.max(1, Math.ceil(dist / stepLen));
