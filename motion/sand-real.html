@@ -268,7 +268,9 @@ function applyAction(a, tA, tB) {
       case 'palm': palmEdge(pb[0], pb[1], a.r, vx, vy, a.strength ?? 0.94, a.streak ?? 0.35); break;
     }
   }
-  relax();
+  // The bank in front of a moving palm would slump back into the strip just
+  // cleared, leaving a line per tick; let it settle only once the sweep ends.
+  if (a.kind !== 'palm' || tB >= a.t1) relax(); else BOX = null;
 }
 // The palm spreading sand: cells near the palm grow towards the target.
 function spreadStep(a, cx, cy, dt) {
@@ -335,7 +337,7 @@ writeDong(640, 160, 330, 5.3, 1.9, 9);
 // 擦: the side of the palm wipes it away in three curving passes
 [[200, 7.6, 0], [380, 8.15, 1], [560, 8.7, 2]].forEach(([y, t0, i]) =>
   act({ kind: 'palm', t0, t1: t0 + 0.9, r: 130, strength: 0.95, streak: 0.3, easeFn: glide,
-    path: path([[[-80, y + 30], [640, y - 40 + i * 20], [1380, y + 20]]], 40) }));
+    path: path([[[-80, y + 30], [640, y - 40 + i * 20], [1380, y + 20]]], 600) }));
 
 // 抹: a night sky: thick at the top and the corners, thinning to almost nothing
 // around where the moon will be; a heavy band of ground along the bottom
