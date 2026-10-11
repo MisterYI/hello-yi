@@ -13,37 +13,42 @@
 <body>
 <canvas id="c" width="1280" height="720"></canvas>
 <script>
-// Real sand on a light box: a grain simulation driven by a performing hand.
+// Real sand on a light box, version 2: a grain simulation, no shapes drawn.
 //
-// The glass is a grid of 1280x720 cells, each holding a whole number of sand
-// grains. Nothing is ever drawn as a shape: every mark is made by a hand tool
-// moving grains around over time, the way a sand artist works:
-//   撒 sprinkle  - a fist scatters grains widely to lay the base
-//   漏 leak      - grains trickle from a fist in a narrow stream: lines and fills
-//   勾/划 finger - a fingertip pushes grains aside: they pile into ridges
-//   擦/抹 palm   - the side of the palm pushes sand into a bank, leaving streaks
-//   点 poke      - a fingertip pressed into the sand: stars, catchlights
-// Piles steeper than the angle of repose slump onto their neighbours.
-// The simulation is stateful, so frames are produced in order; seeking
-// backwards replays from the start (deterministic, seeded).
-// Light through the sand: T = exp(-a * grains), so a single grain is a faint
-// speck and a dozen are opaque. The hand is a dark, out-of-focus silhouette
-// hovering over the glass.
+// What real sand art looks like (studied from frames of Kseniya Simonova's
+// and other artists' performances):
+//   - high contrast: glass wiped clean glows almost cream-white, thin sand is
+//     golden amber, thick sand is a deep brown-black, with smoky gradients
+//     between them; grain shows subtly, mostly at edges and in thin sand
+//   - big forms are spread with the palm and have feathered edges; detail is
+//     cut with a fingertip (clean bright lines with a ridge either side), a
+//     fingernail (hair-thin lines), and rows of pressed "pearl" dots
+//
+// The glass is a 1280x720 grid; each cell holds a whole number of grains,
+// about LAYER grains for one even layer, so a thin layer reads as a smooth
+// translucent tone with fine grain rather than speckle. Every mark is made by
+// a tool moving grains over time: spread (palm laying a layer), fill (a fist
+// trickling sand into a shape), finger, fingernail, palm edge (擦, bulldozing
+// a bank and leaving streaks), poke (pearls). Piles slump past the angle of
+// repose. The simulation is stateful and deterministic: frames are produced in
+// order, and seeking backwards replays from the start.
 
 const W = 1280, H = 720, N = W * H, FPS = 30;
+const LAYER = 24;          // grains in one even layer of sand
+const ABSORB = 0.085;      // light lost per grain: T = exp(-ABSORB * grains)
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const img = ctx.createImageData(W, H);
 const frame = new OffscreenCanvas(W, H), fctx = frame.getContext('2d');
 const bloom = new OffscreenCanvas(W / 4, H / 4), bctx = bloom.getContext('2d');
-const handLayer = new OffscreenCanvas(W, H), hctx = handLayer.getContext('2d');
 
 // ---------- helpers ----------
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const lerp = (a, b, k) => a + (b - a) * k;
 const prog = (t, a, b) => clamp((t - a) / (b - a));
-const smooth = k => k * k * (3 - 2 * k);
-const ease = k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+// A confident hand stroke: quick to start, slowing into the end.
+const stroke = k => 1 - Math.pow(1 - k, 2.2);
+const glide = k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
 function mulberry(seed) {
   return () => {
     seed |= 0; seed = seed + 0x6D2B79F5 | 0;
@@ -52,14 +57,24 @@ function mulberry(seed) {
     return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
-let R = mulberry(20261011);
-const gauss = () => { let u = 0, v = 0; while (u === 0) u = R(); v = R(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+const SEED = 20261011;
+let R = mulberry(SEED);
+const gauss = () => { let u = 0; while (u === 0) u = R(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * R()); };
 const bez = (p0, c, p1, t) => [(1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * c[0] + t * t * p1[0], (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * c[1] + t * t * p1[1]];
-// A polyline sampled from quadratic segments, with cumulative arc length for constant-speed travel.
-function path(segs, n = 30) {
+// A hand never draws a mathematically perfect line: add a slow, small wobble.
+function humanize(pts, amp, seed) {
+  if (!amp) return pts;
+  return pts.map(([x, y], i) => {
+    const a = pts[Math.min(i + 1, pts.length - 1)], b = pts[Math.max(i - 1, 0)];
+    let nx = -(a[1] - b[1]), ny = a[0] - b[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    const w = amp * (Math.sin(i * 0.11 + seed) * 0.6 + Math.sin(i * 0.037 + seed * 2.3) * 0.4);
+    return [x + nx * w, y + ny * w];
+  });
+}
+function path(segs, n = 30, wob = 0, seed = 0) {
   const pts = [];
   segs.forEach(([p0, c, p1], i) => { for (let j = i ? 1 : 0; j <= n; j++) pts.push(bez(p0, c, p1, j / n)); });
-  return polyPath(pts);
+  return polyPath(humanize(pts, wob, seed));
 }
 function polyPath(pts) {
   const len = [0];
@@ -73,40 +88,71 @@ function polyPath(pts) {
     return [lerp(pts[lo][0], pts[hi][0], k), lerp(pts[lo][1], pts[hi][1], k)];
   } };
 }
-const circlePts = (cx, cy, r, a0 = -Math.PI / 2, turns = 1, n = 60) =>
-  Array.from({ length: n + 1 }, (_, i) => { const a = a0 + i / n * Math.PI * 2 * turns; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; });
+const ring = (cx, cy, r, a0, turns, n, wob = 0, seed = 0) => polyPath(humanize(
+  Array.from({ length: n + 1 }, (_, i) => { const a = a0 + i / n * Math.PI * 2 * turns; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }), wob, seed));
+
+// Smooth noise in [0, 1] over the glass (blurred random), for clouds of sand.
+function cloud(seed, blur) {
+  const c = new OffscreenCanvas(W / 4, H / 4), x = c.getContext('2d', { willReadFrequently: true });
+  const id = x.createImageData(W / 4, H / 4), r = mulberry(seed);
+  for (let i = 0; i < id.data.length; i += 4) { id.data[i] = id.data[i + 1] = id.data[i + 2] = r() * 255; id.data[i + 3] = 255; }
+  x.putImageData(id, 0, 0);
+  const c2 = new OffscreenCanvas(W, H), x2 = c2.getContext('2d', { willReadFrequently: true });
+  x2.filter = `blur(${blur}px)`; x2.drawImage(c, -20, -20, W + 40, H + 40);
+  const d = x2.getImageData(0, 0, W, H).data, out = new Float32Array(N);
+  let lo = 1e9, hi = -1e9;
+  for (let i = 0; i < N; i++) { out[i] = d[i * 4]; lo = Math.min(lo, out[i]); hi = Math.max(hi, out[i]); }
+  for (let i = 0; i < N; i++) out[i] = (out[i] - lo) / (hi - lo || 1);
+  return out;
+}
+// A soft (feathered) mask from a drawn shape, values 0..1.
+function softMask(drawPath, feather = 2) {
+  const c = new OffscreenCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
+  x.filter = `blur(${feather}px)`; x.fillStyle = '#fff'; x.strokeStyle = '#fff'; drawPath(x);
+  const d = x.getImageData(0, 0, W, H).data, m = new Float32Array(N);
+  for (let i = 0; i < N; i++) m[i] = d[i * 4 + 3] / 255;
+  return m;
+}
 
 // ---------- the sand ----------
 const G = new Uint16Array(N);
-let BOX = null;   // bounding box touched this step, for relaxation
+let BOX = null;
 function touch(x0, y0, x1, y1) {
   x0 = Math.max(1, Math.floor(x0)); y0 = Math.max(1, Math.floor(y0)); x1 = Math.min(W - 2, Math.ceil(x1)); y1 = Math.min(H - 2, Math.ceil(y1));
-  if (!BOX) BOX = [x0, y0, x1, y1]; else BOX = [Math.min(BOX[0], x0), Math.min(BOX[1], y0), Math.max(BOX[2], x1), Math.max(BOX[3], y1)];
+  BOX = BOX ? [Math.min(BOX[0], x0), Math.min(BOX[1], y0), Math.max(BOX[2], x1), Math.max(BOX[3], y1)] : [x0, y0, x1, y1];
 }
-function drop(x, y, k = 1) {
+function drop1(x, y, k) {
   x = x | 0; y = y | 0;
   if (x < 0 || y < 0 || x >= W || y >= H) return;
-  G[y * W + x] += k;
+  const i = y * W + x; G[i] = Math.min(65000, G[i] + k);
 }
-// Scatter `count` grains around (x, y) with spread s; optional mask restricts where they land.
-function deposit(x, y, count, s, mask = null, spill = 0) {
-  let n = Math.floor(count) + (R() < count % 1 ? 1 : 0);
-  for (let i = 0; i < n; i++) {
+// Sand never lands on a single point: spread k grains over a few nearby cells.
+function drop(x, y, k = 1) {
+  if (k <= 3) { drop1(x, y, k); return; }
+  const parts = Math.min(8, (k / 3) | 0);
+  let left = k;
+  for (let j = 0; j < parts; j++) {
+    const c = j === parts - 1 ? left : Math.floor(k / parts);
+    left -= c;
+    drop1(x + (R() - 0.5) * 3.2, y + (R() - 0.5) * 3.2, c);
+  }
+}
+// Trickle `count` grains around (x, y) with spread s, in small clumps; a soft
+// mask makes landing likelier where it is higher.
+function trickle(x, y, count, s, mask = null) {
+  let n = count;
+  while (n > 0) {
+    const k = Math.min(n, 1 + ((R() * 4) | 0));
+    n -= k;
     const gx = x + gauss() * s, gy = y + gauss() * s;
-    if (mask) {
-      const xi = gx | 0, yi = gy | 0;
-      if (xi < 0 || yi < 0 || xi >= W || yi >= H) continue;
-      if (!mask[yi * W + xi] && R() > spill) continue;
-    }
-    drop(gx, gy);
+    if (mask) { const xi = gx | 0, yi = gy | 0; if (xi < 0 || yi < 0 || xi >= W || yi >= H || R() > mask[yi * W + xi]) continue; }
+    drop(gx, gy, k);
   }
   touch(x - 3 * s, y - 3 * s, x + 3 * s, y + 3 * s);
 }
-// A tool of radius r at (cx, cy) moving along (vx, vy): grains under it are
-// pushed out to its rim, mostly forward and to the sides. `streak` lets some
-// grains slip under a wide palm in lanes parallel to the motion.
-const LANE = (() => { const r = mulberry(77), a = new Float32Array(4096); let v = 0.5; for (let i = 0; i < 4096; i++) { v = clamp(v + (r() - 0.5) * 0.22); a[i] = v; } return a; })();
-function push(cx, cy, r, vx, vy, strength = 0.97, streak = 0, mask = null, fwd = 0.7) {
+// A fingertip of radius r moving along (vx, vy): grains under it go to its rim,
+// mostly to the sides and a little ahead, piling ridges along the line.
+function push(cx, cy, r, vx, vy, strength = 0.95, fwd = 0.6) {
   const vl = Math.hypot(vx, vy), ux = vl ? vx / vl : 0, uy = vl ? vy / vl : 0;
   const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
   const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
@@ -115,10 +161,9 @@ function push(cx, cy, r, vx, vy, strength = 0.97, streak = 0, mask = null, fwd =
     const dx = x + 0.5 - cx, dy = y + 0.5 - cy, d2 = dx * dx + dy * dy;
     if (d2 > r2) continue;
     const i = y * W + x, n = G[i];
-    if (!n || (mask && !mask[i])) continue;
+    if (!n) continue;
     const d = Math.sqrt(d2);
-    let f = strength * (d < r * 0.55 ? 1 : 1 - (d - r * 0.55) / (r * 0.45) * 0.55);
-    if (streak) f *= 1 - streak * LANE[(((x * -uy + y * ux) | 0) % 4096 + 4096) % 4096];
+    const f = strength * (d < r * 0.6 ? 1 : 1 - (d - r * 0.6) / (r * 0.4) * 0.6);
     let m = Math.floor(n * f + R());
     if (m > n) m = n;
     if (!m) continue;
@@ -126,127 +171,144 @@ function push(cx, cy, r, vx, vy, strength = 0.97, streak = 0, mask = null, fwd =
     let ax = d ? dx / d : R() - 0.5, ay = d ? dy / d : R() - 0.5;
     if (vl) { ax += ux * fwd; ay += uy * fwd; }
     const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al;
-    // spread the moved grains over a few spots just outside the rim
-    const chunks = m < 3 ? m : 3;
+    const chunks = Math.min(m, 4);
+    let left = m;
     for (let c = 0; c < chunks; c++) {
-      const k = c === chunks - 1 ? m - Math.floor(m / chunks) * (chunks - 1) : Math.floor(m / chunks);
-      const dist = r + 0.6 + R() * 2.2;
-      drop(cx + ax * dist + (R() - 0.5) * 2.5, cy + ay * dist + (R() - 0.5) * 2.5, k);
+      const k = c === chunks - 1 ? left : Math.floor(m / chunks);
+      left -= k;
+      const dist = r + 0.5 + R() * Math.max(2, r * 0.35);
+      drop(cx + ax * dist + (R() - 0.5) * 2, cy + ay * dist + (R() - 0.5) * 2, k);
     }
   }
-  touch(cx - r - 6, cy - r - 6, cx + r + 6, cy + r + 6);
+  touch(cx - r * 1.5 - 4, cy - r * 1.5 - 4, cx + r * 1.5 + 4, cy + r * 1.5 + 4);
 }
-// The side of the palm: a straight edge of half-length L, perpendicular to the
-// motion. Sand under it is carried to just in front of the edge (a bank that
-// travels with the hand); a little slips under in lanes, leaving streaks.
-function palmEdge(cx, cy, L, vx, vy, strength = 0.92, streak = 0.4) {
+// The side of the palm: a straight edge (half-length L) across the motion,
+// carrying sand to a bank in front of it; some slips under in lanes (streaks).
+const LANE = (() => { const r = mulberry(77), a = new Float32Array(4096); let v = 0.5; for (let i = 0; i < 4096; i++) { v = clamp(v + (r() - 0.5) * 0.18); a[i] = v; } return a; })();
+// Lanes vary smoothly across the edge (interpolated, so no steps between cells).
+const laneAt = v => { const f = Math.floor(v), k = v - f, i = ((f % 4096) + 4096) % 4096; return lerp(LANE[i], LANE[(i + 1) % 4096], k); };
+function palmEdge(cx, cy, L, vx, vy, strength = 0.94, streak = 0.35) {
   const vl = Math.hypot(vx, vy);
   if (!vl) return;
-  const ux = vx / vl, uy = vy / vl, px = -uy, py = ux, w = Math.max(3, vl * 1.4);
-  const ext = L + w + 4;
+  const ux = vx / vl, uy = vy / vl, px = -uy, py = ux, w = Math.max(3, vl * 1.4), ext = L + w + 4;
   const x0 = Math.max(0, Math.floor(cx - ext)), x1 = Math.min(W - 1, Math.ceil(cx + ext));
   const y0 = Math.max(0, Math.floor(cy - ext)), y1 = Math.min(H - 1, Math.ceil(cy + ext));
   for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-    const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
-    const a = dx * ux + dy * uy, b = dx * px + dy * py;
+    const dx = x + 0.5 - cx, dy = y + 0.5 - cy, a = dx * ux + dy * uy, b = dx * px + dy * py;
     if (a < -w || a > 1.5 || Math.abs(b) > L) continue;
     const i = y * W + x, n = G[i];
     if (!n) continue;
-    const edgeSoft = Math.abs(b) > L - 10 ? (L - Math.abs(b)) / 10 : 1;
-    const lane = LANE[(((x * px + y * py) | 0) % 4096 + 4096) % 4096];
-    const f = strength * edgeSoft * (1 - streak * lane * lane);
-    let m = Math.floor(n * f + R());
+    const soft = Math.abs(b) > L - 24 ? (L - Math.abs(b)) / 24 : 1;
+    const lane = laneAt(x * px + y * py);
+    let m = Math.floor(n * strength * soft * (1 - streak * lane * lane) + R());
     if (m > n) m = n;
     if (!m) continue;
     G[i] = n - m;
-    // carried to the front of the edge; near the ends some spill sideways
-    const ahead = 2 + R() * 3, side = Math.abs(b) > L - 14 ? Math.sign(b) * R() * 6 : (R() - 0.5) * 1.5;
+    const ahead = 2 + R() * 4, side = Math.abs(b) > L - 24 ? Math.sign(b) * R() * 8 : (R() - 0.5) * 2;
     drop(cx + ux * ahead + px * (b + side), cy + uy * ahead + py * (b + side), m);
   }
   touch(cx - ext - 8, cy - ext - 8, cx + ext + 8, cy + ext + 8);
 }
-// Angle of repose: grains slide off any cell much higher than a neighbour.
+// Angle of repose: a cell much higher than a neighbour slumps onto it.
 function relax() {
   if (!BOX) return;
   const [x0, y0, x1, y1] = BOX;
+  const lim = LAYER * 2.2;
   for (let pass = 0; pass < 2; pass++) for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
     const i = y * W + x, n = G[i];
-    if (n < 6) continue;
-    const nb = [i - 1, i + 1, i - W, i + W][(R() * 4) | 0];
-    if (n - G[nb] > 5) { const m = (n - G[nb]) >> 2; G[i] -= m; G[nb] += m; }
+    if (n < lim) continue;
+    const avg = (G[i - 1] + G[i + 1] + G[i - W] + G[i + W]) / 4;
+    const diff = n - avg;
+    if (diff > lim) {
+      const m = (diff / 10) | 0;
+      G[i] -= m * 4; G[i - 1] += m; G[i + 1] += m; G[i - W] += m; G[i + W] += m;
+    }
   }
   BOX = null;
 }
 
-// ---------- the hand's repertoire ----------
-// Each action runs from t0 to t1 and moves its tool along a path.
-// kinds: sprinkle, leak, fill (leak restricted to a shape), finger, palm, poke.
-function shapeMask(drawPath) {
-  const c = new OffscreenCanvas(W, H), x = c.getContext('2d', { willReadFrequently: true });
-  x.fillStyle = '#fff'; drawPath(x);
-  const d = x.getImageData(0, 0, W, H).data, m = new Uint8Array(N);
-  for (let i = 0; i < N; i++) m[i] = d[i * 4 + 3] > 127 ? 1 : 0;
-  return m;
-}
-// A back-and-forth path covering a shape's bounding box, for filling with a stream.
+// ---------- actions: what the hand does, and when ----------
+// spread: the palm lays a layer, approaching a target thickness where it passes
+// fill:   sand trickled into a soft mask along a back-and-forth path
+// leak:   a narrow stream along a path
+// finger / nail: a fingertip or fingernail cutting a line
+// palm:   the side of the palm sweeping
+// poke:   a fingertip pressed straight down (a pearl)
+const ACTIONS = [];
+const act = a => { ACTIONS.push(a); return a; };
 function zigzag(x0, y0, x1, y1, step) {
   const pts = []; let flip = false;
   for (let y = y0; y <= y1; y += step) { pts.push(flip ? [x1, y] : [x0, y]); pts.push(flip ? [x0, y] : [x1, y]); flip = !flip; }
   return polyPath(pts);
 }
-const ACTIONS = [];
-const act = (a) => { ACTIONS.push(a); return a; };
-
 function applyAction(a, tA, tB) {
-  const u0 = (a.easeFn || (k => k))(prog(tA, a.t0, a.t1)), u1 = (a.easeFn || (k => k))(prog(tB, a.t0, a.t1));
-  if (u1 <= u0 && a.kind !== 'poke') return;
+  const e = a.easeFn || (k => k);
+  const u0 = e(prog(tA, a.t0, a.t1)), u1 = e(prog(tB, a.t0, a.t1));
+  if (a.kind === 'poke') {
+    if (tA <= a.t0 && tB > a.t0) { const [x, y] = a.path.at(0); for (let k = 0; k < 3; k++) push(x, y, a.r, 0, 0, 0.97); relax(); }
+    return;
+  }
+  if (u1 <= u0) return;
   const p0 = a.path.at(u0), p1 = a.path.at(u1);
   const dist = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
-  const stepLen = a.kind === 'finger' ? Math.max(0.8, a.r * 0.3) : a.kind === 'palm' ? 2.5 : Math.max(2, (a.s || 4) * 0.8);
+  const stepLen = a.kind === 'finger' || a.kind === 'nail' ? Math.max(0.7, a.r * 0.3) : a.kind === 'palm' ? 2.5 : a.kind === 'spread' ? a.r * 0.25 : Math.max(2, a.s * 0.8);
   const steps = Math.max(1, Math.ceil(dist / stepLen));
-  const dtTotal = tB - tA;
+  const dt = (tB - tA) / steps;
   for (let s = 0; s < steps; s++) {
     const ua = lerp(u0, u1, s / steps), ub = lerp(u0, u1, (s + 1) / steps);
-    const pa = a.path.at(ua), pb = a.path.at(ub);
-    const vx = pb[0] - pa[0], vy = pb[1] - pa[1];
-    const dt = dtTotal / steps;
+    const pa = a.path.at(ua), pb = a.path.at(ub), vx = pb[0] - pa[0], vy = pb[1] - pa[1];
     switch (a.kind) {
-      case 'sprinkle': case 'leak': case 'fill': {
-        const flow = a.rate * dt * (a.flowFn ? a.flowFn(ub) : 1);
-        deposit(pb[0], pb[1], flow, a.s, a.mask, a.spill || 0);
-        break;
-      }
-      case 'finger': {
+      case 'spread': spreadStep(a, pb[0], pb[1], dt); break;
+      case 'fill': case 'leak': trickle(pb[0], pb[1], Math.floor(a.rate * dt + R()), a.s, a.mask); break;
+      case 'finger': case 'nail': {
         const r = a.r * (a.pressFn ? a.pressFn(ub) : 1);
-        if (r > 0.6) push(pb[0], pb[1], r, vx, vy, a.strength ?? 0.95, 0, a.mask, 0.6);
+        if (r > 0.5) push(pb[0], pb[1], r, vx, vy, a.strength ?? (a.kind === 'nail' ? 0.85 : 0.95), a.kind === 'nail' ? 0.3 : 0.6);
         break;
       }
-      case 'palm':
-        palmEdge(pb[0], pb[1], a.r, vx, vy, a.strength ?? 0.92, a.streak ?? 0.4);
-        break;
+      case 'palm': palmEdge(pb[0], pb[1], a.r, vx, vy, a.strength ?? 0.94, a.streak ?? 0.35); break;
     }
-  }
-  if (a.kind === 'poke' && tA < a.t0 + 0.05 && tB >= a.t0) {
-    const [x, y] = a.path.at(0);
-    for (let k = 0; k < 3; k++) push(x, y, a.r, 0, 0, 0.98);
   }
   relax();
 }
-
-// ---------- the performance (test piece, ~21 s) ----------
-const CX = 640, CY = 360;
-// 撒: lay the base, a few passes of a scattering fist, heavier at the edges of the glass
-(() => {
-  for (let i = 0; i < 11; i++) {
-    const y = 20 + i * 68, wob = (k) => Math.sin(k * 9 + i) * 18;
-    act({ kind: 'sprinkle', t0: 0.1 + i * 0.2, t1: 0.42 + i * 0.2, s: 56, rate: 520000,
-      path: polyPath(Array.from({ length: 12 }, (_, j) => { const x = i % 2 ? 1340 - j * 127 : -60 + j * 127; return [x, y + wob(j)]; })) });
+// The palm spreading sand: cells near the palm grow towards the target.
+function spreadStep(a, cx, cy, dt) {
+  if (!a.added) a.added = new Float32Array(N);
+  const r = a.r, x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+  const k = a.rate * dt, inv = 1 / (2 * (r * 0.45) ** 2);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x - cx, dy = y - cy, d2 = dx * dx + dy * dy;
+    if (d2 > r * r) continue;
+    const i = y * W + x, want = a.target[i] - a.added[i];
+    if (want <= 0) continue;
+    const add = Math.min(want, a.target[i] * k * Math.exp(-d2 * inv));
+    const g = Math.floor(add + R());
+    a.added[i] += add;
+    if (g) G[i] = Math.min(65000, G[i] + g);
   }
-  act({ kind: 'sprinkle', t0: 2.3, t1: 3.0, s: 40, rate: 380000,
-    path: polyPath([[30, 40], [1250, 40], [1250, 690], [30, 690], [30, 40]]) });
-})();
+}
+// Build a target thickness field (in grains) from a function of (x, y).
+function field(fn) { const f = new Float32Array(N); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) f[y * W + x] = Math.max(0, fn(x, y, y * W + x)) * LAYER; return f; }
+// A sweeping, looping palm route over a rectangle.
+function sweepRoute(x0, y0, x1, y1, loops, seed) {
+  const pts = [];
+  for (let i = 0; i <= 200; i++) {
+    const k = i / 200;
+    pts.push([lerp(x0, x1, 0.5 + 0.5 * Math.sin(k * Math.PI * 2 * loops + seed)), lerp(y0, y1, k) + Math.sin(k * 40 + seed) * 30]);
+  }
+  return polyPath(pts);
+}
 
-// 勾: the finger writes 冬冬, stroke by stroke (撇, 横撇, 捺, 点, 点)
+// ---------- the performance (test piece, 20 s) ----------
+const CLOUD = cloud(5, 26), CLOUD2 = cloud(9, 60);
+const vignette = (x, y) => { const dx = (x - 640) / 640, dy = (y - 360) / 360; return Math.sqrt(dx * dx * 0.9 + dy * dy * 1.1); };
+
+// 抹: the palm spreads the first layer: heavier at the edges of the glass, clouded
+act({ kind: 'spread', t0: 0.1, t1: 3.0, r: 230, rate: 2.6, easeFn: glide,
+  target: field((x, y, i) => 1.0 + 1.2 * clamp(vignette(x, y) - 0.55) * 2 + 0.32 * (CLOUD[i] - 0.5) + 0.22 * (CLOUD2[i] - 0.5)),
+  path: sweepRoute(80, 60, 1200, 660, 3.5, 1) });
+
+// 勾: the finger writes 冬冬 (撇, 横撇, 捺, 点, 点), quick strokes that slow into their ends
 const DONG = [
   { segs: [[[0.47, 0.06], [0.40, 0.18], [0.24, 0.34]]], w: 0.03 },
   { segs: [[[0.38, 0.17], [0.55, 0.15], [0.72, 0.17]], [[0.72, 0.17], [0.58, 0.40], [0.24, 0.58]]], w: 0.028 },
@@ -254,182 +316,114 @@ const DONG = [
   { segs: [[[0.46, 0.66], [0.50, 0.69], [0.54, 0.74]]], w: 0.034, dot: true },
   { segs: [[[0.44, 0.82], [0.49, 0.86], [0.54, 0.91]]], w: 0.036, dot: true },
 ];
-function writeDong(x, y, size, t0, dur) {
+function writeDong(x, y, size, t0, dur, seed) {
   const lens = DONG.map(s => s.segs.reduce((a, [p0, , p1]) => a + Math.hypot(p1[0] - p0[0], p1[1] - p0[1]), 0));
-  const total = lens.reduce((a, b) => a + b, 0) + DONG.length * 0.25;
+  const total = lens.reduce((a, b) => a + b, 0) + DONG.length * 0.2;
   let tt = t0;
   DONG.forEach((s, i) => {
-    const d = dur * lens[i] / total, gap = dur * 0.25 / total;
-    const p = path(s.segs.map(seg => seg.map(([u, v]) => [x + u * size, y + v * size])), 20);
-    const press = s.nab ? (u => 0.55 + 0.6 * Math.pow(u, 1.3) * (u > 0.9 ? (1 - u) * 10 : 1))
-      : s.dot ? (u => 0.5 + 0.7 * Math.sin(Math.PI * u)) : (u => 0.45 + 0.65 * Math.sin(Math.PI * clamp(u * 1.1 - 0.05)));
-    act({ kind: 'finger', t0: tt, t1: tt + d, r: s.w * size, pressFn: press, path: p, easeFn: ease });
+    const d = dur * lens[i] / total, gap = dur * 0.2 / total;
+    const p = path(s.segs.map(seg => seg.map(([u, v]) => [x + u * size, y + v * size])), 24, size * 0.006, seed + i);
+    const press = s.nab ? (u => 0.55 + 0.65 * Math.pow(u, 1.2) * (u > 0.88 ? (1 - u) / 0.12 : 1))
+      : s.dot ? (u => 0.5 + 0.75 * Math.sin(Math.PI * u)) : (u => 0.5 + 0.6 * Math.sin(Math.PI * clamp(u * 1.1 - 0.05)));
+    act({ kind: 'finger', t0: tt, t1: tt + d, r: s.w * size, pressFn: press, path: p, easeFn: stroke });
     tt += d + gap;
   });
 }
-writeDong(330, 170, 320, 3.3, 2.0);
-writeDong(640, 170, 320, 5.5, 2.0);
+writeDong(330, 160, 330, 3.3, 1.9, 1);
+writeDong(640, 160, 330, 5.3, 1.9, 9);
 
-// 擦: the side of the palm sweeps everything to the right, in overlapping passes
-[[160, 8.3], [330, 9.2], [500, 10.1], [660, 11.0]].forEach(([y, t0], i) =>
-  act({ kind: 'palm', t0, t1: t0 + 1.05, r: 110, strength: 0.96, streak: 0.3, easeFn: ease,
-    path: polyPath([[-60, y + (i % 2 ? 10 : -10)], [1360, y + (i % 2 ? -14 : 12)]]) }));
-// 撒: a fresh, thinner layer for the night sky, heavier along the bottom
-for (let i = 0; i < 8; i++) {
-  const y = 30 + i * 80;
-  act({ kind: 'sprinkle', t0: 12.3 + i * 0.16, t1: 12.6 + i * 0.16, s: 60, rate: 330000 + (i > 5 ? 300000 : 0),
-    path: polyPath(i % 2 ? [[1340, y], [-60, y + 10]] : [[-60, y], [1340, y - 10]]) });
-}
+// 擦: the side of the palm wipes it away in three curving passes
+[[200, 7.6, 0], [380, 8.15, 1], [560, 8.7, 2]].forEach(([y, t0, i]) =>
+  act({ kind: 'palm', t0, t1: t0 + 0.9, r: 130, strength: 0.95, streak: 0.3, easeFn: glide,
+    path: path([[[-80, y + 30], [640, y - 40 + i * 20], [1380, y + 20]]], 40) }));
 
-// 勾+擦: fingers circle out the moon from its centre
-const MOON = { x: 400, y: 230, r: 74 };
-act({ kind: 'finger', t0: 14.3, t1: 15.7, r: 13, strength: 0.98,
-  path: polyPath(Array.from({ length: 160 }, (_, i) => { const k = i / 159, a = k * Math.PI * 2 * 4.2; const rr = k * (MOON.r - 12); return [MOON.x + rr * Math.cos(a), MOON.y + rr * Math.sin(a)]; })) });
-act({ kind: 'finger', t0: 15.7, t1: 16.2, r: 8, strength: 0.98, path: polyPath(circlePts(MOON.x, MOON.y, MOON.r - 3, -Math.PI / 2, 1.08, 80)) });
+// 抹: a night sky: thick at the top and the corners, thinning to almost nothing
+// around where the moon will be; a heavy band of ground along the bottom
+const MOON = { x: 410, y: 240, r: 72 };
+act({ kind: 'spread', t0: 9.6, t1: 12.0, r: 210, rate: 2.8, easeFn: glide,
+  target: field((x, y, i) => {
+    const dm = Math.hypot(x - MOON.x, (y - MOON.y) * 1.1);
+    const sky = 0.15 + 1.5 * clamp((dm - 90) / 520) + 0.5 * (CLOUD2[i] - 0.5) * clamp((dm - 120) / 300);
+    return sky + (y > 600 ? 2.2 * clamp((y - 600) / 30) : 0) + 1.2 * clamp(vignette(x, y) - 0.75) * 3;
+  }),
+  path: sweepRoute(60, 40, 1220, 690, 3, 4) });
 
-// 漏: a fist pours the roof, then 冬冬 sitting on it, seen from behind
-const ROOF = shapeMask(c => { c.beginPath(); c.moveTo(560, 720); c.lineTo(610, 590); c.lineTo(1180, 590); c.lineTo(1280, 650); c.lineTo(1280, 720); c.closePath(); c.fill(); });
-act({ kind: 'fill', t0: 16.2, t1: 17.6, s: 7, rate: 260000, mask: ROOF, spill: 0.03, path: zigzag(560, 596, 1280, 716, 12) });
-const CAT = { x: 900, by: 592, s: 0.62 };
-const CAT_MASK = shapeMask(c => {
+// 勾+擦: fingers circle the moon clean from its centre outwards, then trace its rim
+act({ kind: 'finger', t0: 12.1, t1: 13.3, r: 14, strength: 0.97, easeFn: glide,
+  path: polyPath(humanize(Array.from({ length: 140 }, (_, i) => { const k = i / 139, a = k * Math.PI * 2 * 3.6; const rr = 4 + k * (MOON.r - 13); return [MOON.x + rr * Math.cos(a), MOON.y + rr * Math.sin(a)]; }), 1.5, 3)) });
+
+// 漏: a fist trickles the roof and 冬冬 on it, from behind; edges stay soft
+const ROOF = softMask(c => { c.beginPath(); c.moveTo(560, 720); c.lineTo(612, 588); c.quadraticCurveTo(620, 582, 640, 582); c.lineTo(1170, 584); c.lineTo(1290, 640); c.lineTo(1290, 720); c.closePath(); c.fill(); }, 2.5);
+act({ kind: 'fill', t0: 13.5, t1: 14.8, s: 9, rate: 2.6e6, mask: ROOF, path: zigzag(570, 586, 1290, 716, 16), easeFn: glide });
+const CAT = { x: 900, by: 586, s: 0.62 };
+const CAT_MASK = softMask(c => {
   const s = CAT.s, X = v => CAT.x + v * s, Y = v => CAT.by + v * s;
-  for (const [x, y, rx, ry] of [[0, -66, 72, 74], [0, -128, 54, 42], [0, -178, 47, 44], [-32, -160, 24, 20], [32, -160, 24, 20]]) {
-    c.beginPath(); c.ellipse(X(x), Y(y), rx * s, ry * s, 0, 0, Math.PI * 2); c.fill();
-  }
-  for (const tri of [[[-42, -196], [-30, -232], [-10, -214]], [[42, -196], [30, -232], [10, -214]]]) {
-    c.beginPath(); tri.forEach(([x, y], i) => i ? c.lineTo(X(x), Y(y)) : c.moveTo(X(x), Y(y))); c.closePath(); c.fill();
-  }
-});
-act({ kind: 'fill', t0: 17.6, t1: 19.0, s: 4.5, rate: 120000, mask: CAT_MASK, spill: 0.05, path: zigzag(CAT.x - 50, CAT.by - 150, CAT.x + 50, CAT.by, 7) });
-// the tail, leaked as a thick line
-act({ kind: 'leak', t0: 19.0, t1: 19.5, s: 5, rate: 30000,
-  path: path([[[CAT.x + 32, CAT.by - 8], [CAT.x + 95, CAT.by + 2], [CAT.x + 104, CAT.by - 30]], [[CAT.x + 104, CAT.by - 30], [CAT.x + 108, CAT.by - 50], [CAT.x + 92, CAT.by - 54]]], 16) });
-// 点: stars
-[[160, 110], [250, 60], [560, 90], [640, 170], [760, 60], [870, 130], [1000, 80], [1120, 150], [690, 260]].forEach(([x, y], i) =>
-  act({ kind: 'poke', t0: 19.6 + i * 0.09, t1: 19.7 + i * 0.09, r: 2.6 + (i % 3) * 0.8, path: polyPath([[x, y], [x, y]]) }));
-// 勾: moonlight catching the cat's fur on the side facing the moon
-act({ kind: 'finger', t0: 20.5, t1: 21.0, r: 1.6, strength: 0.85,
-  path: polyPath(Array.from({ length: 30 }, (_, i) => { const a = lerp(Math.PI * 1.05, Math.PI * 1.45, i / 29); return [CAT.x + 44 * CAT.s * Math.cos(a), CAT.by - 178 * CAT.s + 41 * CAT.s * Math.sin(a)]; })) });
+  for (const [x, y, rx, ry] of [[0, -66, 72, 74], [0, -128, 54, 42], [0, -178, 47, 44], [-32, -160, 24, 20], [32, -160, 24, 20]]) { c.beginPath(); c.ellipse(X(x), Y(y), rx * s, ry * s, 0, 0, Math.PI * 2); c.fill(); }
+  for (const tri of [[[-42, -196], [-30, -232], [-10, -214]], [[42, -196], [30, -232], [10, -214]]]) { c.beginPath(); tri.forEach(([x, y], i) => i ? c.lineTo(X(x), Y(y)) : c.moveTo(X(x), Y(y))); c.closePath(); c.fill(); }
+}, 1.5);
+act({ kind: 'fill', t0: 14.8, t1: 16.0, s: 5, rate: 1.4e6, mask: CAT_MASK, path: zigzag(CAT.x - 50, CAT.by - 150, CAT.x + 50, CAT.by, 6), easeFn: glide });
+act({ kind: 'leak', t0: 16.0, t1: 16.45, s: 4.5, rate: 2.2e5, easeFn: stroke,
+  path: path([[[CAT.x + 32, CAT.by - 8], [CAT.x + 95, CAT.by + 2], [CAT.x + 104, CAT.by - 30]], [[CAT.x + 104, CAT.by - 30], [CAT.x + 108, CAT.by - 50], [CAT.x + 92, CAT.by - 54]]], 16, 1, 7) });
 
-const DURATION = 23;
+// 点: a row of pearls pressed along the halo, and a few stars
+for (let i = 0; i < 13; i++) {
+  const a = -Math.PI * 0.95 + i * 0.16, rr = MOON.r + 46 + (i % 2) * 6;
+  act({ kind: 'poke', t0: 16.6 + i * 0.06, t1: 16.65 + i * 0.06, r: 3.2 + (i % 3) * 0.6, path: polyPath([[MOON.x + rr * Math.cos(a), MOON.y + rr * Math.sin(a)], [0, 0]]) });
+}
+[[180, 90], [640, 120], [760, 70], [880, 150], [1010, 90], [1130, 170], [560, 300]].forEach(([x, y], i) =>
+  act({ kind: 'poke', t0: 17.5 + i * 0.07, t1: 17.55 + i * 0.07, r: 2.4 + (i % 2), path: polyPath([[x, y], [0, 0]]) }));
+// a fingernail draws moonlight along the cat's head and back
+act({ kind: 'nail', t0: 18.2, t1: 18.7, r: 1.5, easeFn: stroke,
+  path: polyPath(Array.from({ length: 40 }, (_, i) => { const a = lerp(Math.PI * 1.02, Math.PI * 1.45, i / 39); return [CAT.x + 44 * CAT.s * Math.cos(a), CAT.by - 178 * CAT.s + 41 * CAT.s * Math.sin(a)]; })) });
 
-// ---------- the hand ----------
-// A dark, soft silhouette above the glass. Poses: point (index finger down),
-// fist (pouring), palm (sweeping with the side of the hand).
-function handAt(t) {
-  let a = null;
-  for (const x of ACTIONS) if (t >= x.t0 - 0.12 && t <= x.t1 + 0.12) { a = x; }
-  if (!a) return null;
-  const u = (a.easeFn || (k => k))(prog(t, a.t0, a.t1));
-  const [x, y] = a.path.at(u);
-  const pose = a.kind === 'finger' || a.kind === 'poke' ? 'point' : a.kind === 'palm' ? 'palm' : 'fist';
-  const lift = 1 - Math.min(prog(t, a.t0 - 0.12, a.t0), 1 - prog(t, a.t1, a.t1 + 0.12));
-  const q = a.path.at(clamp(u + 0.01)), angle = Math.atan2(q[1] - y, q[0] - x);
-  return { x, y, pose, lift, angle };
-}
-function drawHand(h) {
-  if (!h) return;
-  const ctx = hctx;   // draw solid into the hand layer; composited once below
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, W, H);
-  ctx.save();
-  ctx.translate(h.x + h.lift * 26, h.y + h.lift * 34);
-  ctx.fillStyle = '#140903'; ctx.strokeStyle = '#140903'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-  const cap = (x0, y0, x1, y1, w0, w1 = w0) => {   // tapered capsule
-    const n = 24;
-    for (let i = 0; i < n; i++) {
-      const k = i / (n - 1);
-      ctx.beginPath(); ctx.arc(lerp(x0, x1, k), lerp(y0, y1, k), lerp(w0, w1, k) / 2, 0, Math.PI * 2); ctx.fill();
-    }
-  };
-  const oval = (x, y, rx, ry, rot = 0) => { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); ctx.fill(); };
-  if (h.pose === 'point') {
-    ctx.rotate(-0.55);
-    cap(0, 0, 2, 96, 19, 26);                   // index finger, tip on the glass
-    oval(24, 112, 17, 15); oval(47, 118, 17, 15); oval(68, 128, 16, 14);   // curled fingers' knuckles
-    oval(32, 178, 58, 66);                      // back of the hand
-    cap(-24, 176, -34, 116, 26, 20);            // thumb tucked along the side
-    cap(30, 236, 52, 560, 92, 104);             // wrist and forearm
-  } else if (h.pose === 'fist') {
-    ctx.rotate(-0.55);
-    oval(10, 20, 50, 42);                       // fist over the stream
-    oval(-16, -8, 15, 14); oval(6, -14, 15, 14); oval(28, -10, 15, 14);   // knuckles
-    cap(-30, 20, -20, -10, 24, 20);             // thumb wrapped over
-    cap(20, 60, 52, 560, 88, 104);
-  } else {                                      // side of the palm on the glass
-    ctx.rotate(h.angle || 0);
-    cap(0, -100, 0, 100, 26, 30);               // the edge of the hand
-    oval(-26, 0, 34, 96);                       // the hand above it
-    cap(-34, -86, -8, -128, 22, 18);            // thumb
-    cap(-50, 40, -330, 220, 96, 110);           // forearm trailing behind
-  }
-  ctx.restore();
-  const main = canvas.getContext('2d');
-  main.save();
-  main.filter = 'blur(6px)';
-  main.globalAlpha = 0.7 * (1 - h.lift * 0.55);
-  main.drawImage(handLayer, 0, 0);
-  main.restore();
-}
+const DURATION = 20;
 
 // ---------- simulation clock ----------
 let simT = 0;
-function resetSim() { G.fill(0); R = mulberry(20261011); simT = 0; }
+function resetSim() { G.fill(0); R = mulberry(SEED); simT = 0; for (const a of ACTIONS) a.added = null; }
 function advance(t) {
   if (t < simT - 1e-6) resetSim();
   const dt = 1 / FPS / 2;
   while (simT < t - 1e-9) {
     const tB = Math.min(t, simT + dt);
-    for (const a of ACTIONS) if (tB >= a.t0 && simT <= a.t1 + 0.001) applyAction(a, Math.max(simT, a.t0), Math.min(tB, a.t1 + 0.001));
+    for (const a of ACTIONS) if (tB > a.t0 && simT < a.t1 + 1e-3) applyAction(a, Math.max(simT, a.t0), Math.min(tB, a.t1));
     simT = tB;
   }
 }
 
 // ---------- light through the sand ----------
-let LIGHT = null;
-const ABS = new Float32Array(4096);
-for (let n = 0; n < 4096; n++) ABS[n] = Math.exp(-0.5 * n);
-function lightField() {
-  const L = new Float32Array(N * 3), a = [255, 214, 140], b = [236, 140, 46], e = [118, 50, 12];
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const dx = (x - W * 0.48) / W, dy = (y - H * 0.45) / H, r = Math.sqrt(dx * dx + dy * dy * 1.5);
-    const k1 = clamp(r / 0.48), k2 = clamp((r - 0.48) / 0.32), i = (y * W + x) * 3;
-    for (let j = 0; j < 3; j++) L[i + j] = lerp(lerp(a[j], b[j], k1), e[j], k2);
-  }
-  return L;
+// Transmission is mapped through the light box's palette: clean glass is a
+// warm cream, thin sand golden, thicker amber, thick sand a deep brown-black.
+const STOPS = [[0, [12, 6, 3]], [0.05, [44, 20, 8]], [0.18, [112, 56, 18]], [0.4, [190, 116, 42]], [0.62, [234, 176, 88]], [0.84, [250, 220, 148]], [1, [255, 244, 214]]];
+const LUT = new Uint8Array(1024 * 3);
+for (let i = 0; i < 1024; i++) {
+  const T = i / 1023;
+  let j = 0; while (j < STOPS.length - 2 && T > STOPS[j + 1][0]) j++;
+  const [ta, ca] = STOPS[j], [tb, cb] = STOPS[j + 1], k = (T - ta) / (tb - ta);
+  for (let c = 0; c < 3; c++) LUT[i * 3 + c] = lerp(ca[c], cb[c], k);
 }
+const ABS = new Float32Array(65536);
+for (let n = 0; n < 65536; n++) ABS[n] = Math.exp(-ABSORB * n);
+let LAMP = null;   // the light box is a little brighter in the middle
+function lamp() { const L = new Float32Array(N); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) L[y * W + x] = 1 - 0.18 * clamp(vignette(x, y) - 0.3); return L; }
 function shade() {
   const o = img.data;
-  for (let i = 0, p = 0, q = 0; i < N; i++, p += 4, q += 3) {
-    const T = ABS[G[i] < 4096 ? G[i] : 4095];
-    // grains are dark umber; light passes between them
-    o[p] = LIGHT[q] * T + 26 * (1 - T);
-    o[p + 1] = LIGHT[q + 1] * T + 12 * (1 - T);
-    o[p + 2] = LIGHT[q + 2] * T + 5 * (1 - T);
-    o[p + 3] = 255;
+  for (let i = 0, p = 0; i < N; i++, p += 4) {
+    const T = ABS[G[i]] * LAMP[i], q = ((T * 1023) | 0) * 3;
+    o[p] = LUT[q]; o[p + 1] = LUT[q + 1]; o[p + 2] = LUT[q + 2]; o[p + 3] = 255;
   }
   fctx.putImageData(img, 0, 0);
-  ctx.save();
-  ctx.filter = 'blur(0.45px)';   // the camera's optics
-  ctx.drawImage(frame, 0, 0);
-  ctx.restore();
-  bctx.filter = 'blur(10px)';
-  bctx.clearRect(0, 0, bloom.width, bloom.height);
-  bctx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
-  ctx.save(); ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = 0.3; ctx.drawImage(bloom, 0, 0, W, H); ctx.restore();
+  ctx.save(); ctx.filter = 'blur(0.85px)'; ctx.drawImage(frame, 0, 0); ctx.restore();   // camera optics
+  bctx.filter = 'blur(8px)'; bctx.clearRect(0, 0, bloom.width, bloom.height); bctx.drawImage(canvas, 0, 0, bloom.width, bloom.height);
+  ctx.save(); ctx.globalCompositeOperation = 'screen'; ctx.globalAlpha = 0.22; ctx.drawImage(bloom, 0, 0, W, H); ctx.restore();
 }
 
-function renderFrame(t) {
-  t = clamp(t, 0, DURATION);
-  advance(t);
-  shade();
-  drawHand(handAt(t));
-}
+function renderFrame(t) { t = clamp(t, 0, DURATION); advance(t); shade(); }
 
 window.FPS = FPS;
 window.DURATION = DURATION;
 window.renderFrame = renderFrame;
-window.ready = (async () => { LIGHT = lightField(); renderFrame(0); return true; })();
+window.ready = (async () => { LAMP = lamp(); renderFrame(0); return true; })();
 
 if (!location.search.includes('render')) {
   window.ready.then(() => {
